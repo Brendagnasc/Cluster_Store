@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monitor TP3: sistema real ao vivo</title>
+<style>
+  :root {
+    --bg: #0d1420; --panel: #131c2b; --panel2: #0f1826; --border: #223048;
+    --text: #d7dfeb; --muted: #7d8aa0;
+    --cliente: #f5b942; --sync: #4fc3e8; --store: #a78bfa;
+    --ok: #4ade80; --falha: #f87171;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; min-height: 100vh; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px; }
+  h1 { font-size: 17px; font-weight: 650; }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 12px; display: block; margin-top: 2px; }
+  #status { margin-left: auto; font-size: 12px; font-family: var(--mono); padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); }
+  #status.on { color: var(--ok); border-color: var(--ok); }
+  #status.off { color: var(--falha); border-color: var(--falha); }
+  .grade { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 1fr); gap: 14px; }
+  @media (max-width: 980px) { .grade { grid-template-columns: 1fr; } }
+  .cartao { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .cartao .titulo { padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); border-bottom: 1px solid var(--border); display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .contadores { margin-left: auto; display: flex; gap: 12px; font-family: var(--mono); text-transform: none; letter-spacing: 0; }
+  .contadores b { color: var(--text); }
+  .contadores .m { color: var(--falha); }
+  svg { display: block; width: 100%; height: auto; }
+  .rotulo-col { fill: var(--muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
+  .legenda { padding: 8px 12px; font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--border); line-height: 1.7; }
+  .legenda b { color: var(--text); font-weight: 600; }
+  .legenda code { font-family: var(--mono); color: var(--sync); }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  th, td { padding: 6px 10px; text-align: center; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; }
+  td.item { color: var(--text); font-weight: 700; }
+  .prim { color: var(--ok); }
+  .fora-td { color: var(--falha); opacity: 0.7; }
+  .desatual { color: var(--falha); }
+  #log { font-family: var(--mono); font-size: 11.5px; line-height: 1.65; height: 300px; overflow-y: auto; padding: 10px 12px; background: var(--panel2); }
+  #log div { white-space: pre-wrap; word-break: break-word; }
+  .l-cliente { color: var(--cliente); }
+  .l-sync { color: var(--sync); }
+  .l-store { color: var(--store); }
+  .l-ok { color: var(--ok); }
+  .l-falha { color: var(--falha); font-weight: 600; }
+  .l-ts { color: #56637a; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Monitor TP3: sistema real ao vivo
+    <small>Eventos reais dos processos C++ (Clientes, Cluster Sync e Cluster Store), recebidos em tempo real.</small>
+  </h1>
+  <span id="status" class="off">aguardando eventos...</span>
+</header>
+
+<div class="grade">
+  <div class="cartao">
+    <div class="titulo">Topologia e mensagens
+      <span class="contadores">
+        escritas concluídas: <b id="cEscritas">0</b>
+        falhas mascaradas: <b class="m" id="cMascaradas">0</b>
+      </span>
+    </div>
+    <svg id="palco" viewBox="0 0 900 560" aria-label="Topologia do sistema"></svg>
+    <div class="legenda">
+      <b>W1</b> requisição de escrita &nbsp;•&nbsp; <b>W2</b> move item ao novo primário &nbsp;•&nbsp;
+      <b>W3</b> reconhece escrita concluída &nbsp;•&nbsp; <b>W4</b> atualiza backups &nbsp;•&nbsp; <b>W5</b> reconhece atualização.<br>
+      Injete falhas pelo terminal: <code>./scripts/kill_node.sh sync 0</code> (queda) ou <code>./scripts/kill_node.sh store 1 omissao</code>.
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:14px;">
+    <div class="cartao">
+      <div class="titulo">Estado das réplicas (valor@versão por Store, ● = primário)</div>
+      <table id="tabela"></table>
+    </div>
+    <div class="cartao">
+      <div class="titulo">Terminal (log unificado dos processos)</div>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+// ============ Configuracao (igual ao sistema C++) ============
+const N_CLI = 5, N_SYNC = 5, N_STORE = 3, N_ITENS = 5;
+const ITENS = Array.from({length: N_ITENS}, (_, i) => 'R' + i);
+const CORES = { cliente: '#f5b942', sync: '#4fc3e8', store: '#a78bfa', ok: '#4ade80', falha: '#f87171' };
+
+// ============ Estado espelhado a partir dos logs reais ============
+let escritas = 0, mascaradas = 0;
+const syncVivo  = Array(N_SYNC).fill(true);
+const storeVivo = Array(N_STORE).fill(true);
+const dados = Array.from({length: N_STORE}, () =>
+  Object.fromEntries(ITENS.map(it => [it, { valor: '0', versao: 0 }])));
+const primario = Object.fromEntries(ITENS.map(it => [it, 0]));
+const ultimoValor = Object.fromEntries(ITENS.map(it => [it, '0']));
+
+// ============ Utilitarios ============
+const $ = id => document.getElementById(id);
+const svg = $('palco');
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, pai) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  (pai || svg).appendChild(e);
+  return e;
+}
+
+// ============ Log na tela ============
+const logEl = $('log');
+function log(linhaBruta, classe) {
+  const m = linhaBruta.match(/^\[([^\]]+)\]\[([^\]]+)\] (.*)$/s);
+  const div = document.createElement('div');
+  if (m) div.innerHTML = `<span class="l-ts">[${m[1]}]</span> <span class="${classe}">[${m[2]}]</span> ${m[3]}`;
+  else div.textContent = linhaBruta;
+  logEl.appendChild(div);
+  while (logEl.children.length > 300) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ============ Topologia ============
+const pos = { cli: [], sync: [], store: [] };
+const gruposNo = { cli: [], sync: [], store: [] };
+function desenharTopologia() {
+  for (let i = 0; i < N_CLI;  i++) pos.cli[i]   = { x: 100, y: 80 + i * 100 };
+  for (let i = 0; i < N_SYNC; i++) pos.sync[i]  = { x: 450, y: 80 + i * 100 };
+  for (let i = 0; i < N_STORE;i++) pos.store[i] = { x: 800, y: 130 + i * 150 };
+  for (const [nome, x] of [['Clientes', 100], ['Cluster Sync', 450], ['Cluster Store', 800]]) {
+    const t = el('text', { x, y: 30, 'text-anchor': 'middle', class: 'rotulo-col' });
+    t.textContent = nome;
+  }
+  for (let i = 0; i < N_CLI; i++)  gruposNo.cli[i]   = no('cli', i);
+  for (let i = 0; i < N_SYNC; i++) gruposNo.sync[i]  = no('sync', i);
+  for (let i = 0; i < N_STORE;i++) gruposNo.store[i] = no('store', i);
+  el('g', { id: 'pacotes' });
+}
+function no(tipo, i) {
+  const p = pos[tipo][i];
+  const cor = tipo === 'cli' ? CORES.cliente : tipo === 'sync' ? CORES.sync : CORES.store;
+  const g = el('g', { transform: `translate(${p.x},${p.y})` });
+  const r = tipo === 'store' ? 34 : 26;
+  el('circle', { r, fill: 'transparent', stroke: cor, 'stroke-width': 2.5, class: 'corpo' }, g);
+  const t1 = el('text', { y: -2, 'text-anchor': 'middle', fill: cor, 'font-size': 13, 'font-weight': 700 }, g);
+  t1.textContent = (tipo === 'cli' ? 'C' : tipo === 'sync' ? 'S' : 'St') + i;
+  const t2 = el('text', { y: 14, 'text-anchor': 'middle', fill: '#7d8aa0', 'font-size': 9.5, class: 'estado' }, g);
+  t2.textContent = tipo === 'cli' ? '' : 'ativo';
+  if (tipo === 'store') {
+    const c = el('text', { y: -r - 8, 'text-anchor': 'middle', fill: CORES.ok, 'font-size': 10, class: 'prims' }, g);
+    c.textContent = '';
+  }
+  return g;
+}
+function pintarNo(tipo, i) {
+  const g = gruposNo[tipo][i];
+  if (!g || tipo === 'cli') return;
+  const vivo = tipo === 'sync' ? syncVivo[i] : storeVivo[i];
+  const corpo = g.querySelector('.corpo');
+  const rot = g.querySelector('.estado');
+  const corBase = tipo === 'sync' ? CORES.sync : CORES.store;
+  corpo.setAttribute('stroke', vivo ? corBase : CORES.falha);
+  g.style.opacity = vivo ? 1 : 0.45;
+  rot.textContent = vivo ? 'ativo' : 'SEM RESPOSTA';
+}
+function marcarVivo(tipo, i, vivo) {
+  const arr = tipo === 'sync' ? syncVivo : storeVivo;
+  if (i < 0 || i >= arr.length || arr[i] === vivo) return;
+  arr[i] = vivo;
+  pintarNo(tipo, i);
+  pintarTabela();
+}
+function pintarPrimarios() {
+  for (let s = 0; s < N_STORE; s++) {
+    const meus = ITENS.filter(it => primario[it] === s);
+    gruposNo.store[s].querySelector('.prims').textContent = meus.length ? '● ' + meus.join(' ') : '';
+  }
+}
+function pacote(de, para, rotulo, cor, dur = 500) {
+  const camada = svg.querySelector('#pacotes') || svg;
+  const g = el('g', {}, camada);
+  el('circle', { r: 7, fill: cor }, g);
+  const t = el('text', { y: -11, 'text-anchor': 'middle', fill: cor, 'font-size': 11, 'font-weight': 700 }, g);
+  t.textContent = rotulo;
+  const t0 = performance.now();
+  (function passo(agora) {
+    const f = Math.min(1, (agora - t0) / dur);
+    g.setAttribute('transform', `translate(${de.x + (para.x - de.x) * f},${de.y + (para.y - de.y) * f})`);
+    if (f < 1) requestAnimationFrame(passo); else g.remove();
+  })(t0);
+}
+
+// ============ Tabela ============
+function pintarTabela() {
+  let html = '<tr><th>Item</th>';
+  for (let s = 0; s < N_STORE; s++) html += `<th>Store ${s}</th>`;
+  html += '</tr>';
+  for (const it of ITENS) {
+    const vmax = Math.max(...dados.map(d => d[it].versao));
+    html += `<tr><td class="item">${it}</td>`;
+    for (let s = 0; s < N_STORE; s++) {
+      const d = dados[s][it];
+      const marca = primario[it] === s ? ' <span class="prim">●</span>' : '';
+      let cls = '';
+      if (!storeVivo[s]) cls = 'fora-td';
+      else if (d.versao < vmax) cls = 'desatual';
+      html += `<td class="${cls}">${d.valor}@v${d.versao}${marca}</td>`;
+    }
+    html += '</tr>';
+  }
+  $('tabela').innerHTML = html;
+}
+function pintarContadores() {
+  $('cEscritas').textContent = escritas;
+  $('cMascaradas').textContent = mascaradas;
+}
+
+// ============ Parser dos logs reais do sistema C++ ============
+function processar(linha) {
+  const cab = linha.match(/^\[[^\]]+\]\[(Cliente|Sync|Store) (\d+)\] (.*)$/s);
+  if (!cab) { log(linha, 'l-ts'); return; }
+  const tipo = cab[1], id = parseInt(cab[2]), msg = cab[3];
+  const cls = msg.includes('[FALHA') ? 'l-falha'
+            : msg.includes('[CONSISTENCIA] OK') ? 'l-ok'
+            : tipo === 'Cliente' ? 'l-cliente' : tipo === 'Sync' ? 'l-sync' : 'l-store';
+  log(linha, cls);
+
+  // quem emitiu um log esta vivo
+  if (tipo === 'Sync')  marcarVivo('sync', id, true);
+  if (tipo === 'Store') marcarVivo('store', id, true);
+
+  let m;
+  if (tipo === 'Cliente') {
+    if ((m = msg.match(/W1: enviando requisicao de escrita ao Sync (\d+)/)))
+      pacote(pos.cli[id], pos.sync[+m[1]], 'W1', CORES.cliente);
+    else if ((m = msg.match(/W3 recebido: escrita de (R\d) concluida \(v(\d+)\) via Sync (\d+)/))) {
+      pacote(pos.sync[+m[3]], pos.cli[id], 'W3', CORES.ok);
+      escritas++; pintarContadores();
+    }
+    else if ((m = msg.match(/\[FALHA MASCARADA\] Sync (\d+)/))) {
+      marcarVivo('sync', +m[1], false);
+      mascaradas++; pintarContadores();
+    }
+
+  } else if (tipo === 'Sync') {
+    if ((m = msg.match(/Encaminhando escrita de (R\d) ao Store (\d+)/)))
+      pacote(pos.sync[id], pos.store[+m[2]], 'W', CORES.sync);
+    else if ((m = msg.match(/\[FALHA DETECTADA\] Store (\d+)/)))
+      marcarVivo('store', +m[1], false);
+
+  } else if (tipo === 'Store') {
+    if ((m = msg.match(/W2: movendo item (R\d) do primario antigo \(Store (\d+)\) para o novo primario \(Store (\d+)\)/))) {
+      const it = m[1], antigo = +m[2], novo = +m[3];
+      pacote(pos.store[novo], pos.store[antigo], 'W2', CORES.store);
+      setTimeout(() => pacote(pos.store[antigo], pos.store[novo], it, CORES.store), 260);
+      primario[it] = novo;
+      pintarPrimarios(); pintarTabela();
+    }
+    else if ((m = msg.match(/Escrita aplicada localmente como primario: (R\d) = (\S+) \(v(\d+)/))) {
+      const it = m[1];
+      dados[id][it] = { valor: m[2].replace(/,$/, ''), versao: +m[3] };
+      ultimoValor[it] = dados[id][it].valor;
+      primario[it] = id;
+      pintarPrimarios(); pintarTabela();
+    }
+    else if ((m = msg.match(/W4: dizendo ao backup Store (\d+) para atualizar (R\d) \(v(\d+)\)/)))
+      pacote(pos.store[id], pos.store[+m[1]], 'W4', CORES.store);
+    else if ((m = msg.match(/W5: Store (\d+) reconheceu a atualizacao de (R\d)/)))
+      pacote(pos.store[+m[1]], pos.store[id], 'W5', CORES.ok);
+    else if ((m = msg.match(/W4 recebido do primario Store (\d+): atualizando backup (R\d) para v(\d+)/))) {
+      const it = m[2];
+      dados[id][it] = { valor: ultimoValor[it], versao: +m[3] };
+      primario[it] = +m[1];
+      pintarPrimarios(); pintarTabela();
+    }
+    else if ((m = msg.match(/\[FALHA DETECTADA\] (?:Primario antigo )?Store (\d+)/)))
+      marcarVivo('store', +m[1], false);
+  }
+}
+
+// ============ Conexao SSE com o monitor ============
+const statusEl = $('status');
+const fonte = new EventSource('/events');
+fonte.onopen  = () => { statusEl.textContent = 'conectado: recebendo eventos reais'; statusEl.className = 'on'; };
+fonte.onerror = () => { statusEl.textContent = 'sem conexão com o monitor'; statusEl.className = 'off'; };
+fonte.onmessage = ev => processar(JSON.parse(ev.data));
+
+desenharTopologia();
+pintarPrimarios();
+pintarTabela();
+pintarContadores();
+</script>
+</body>
+</html>
