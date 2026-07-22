@@ -31,7 +31,7 @@ static int intervalo_ms() {
 static void garantir_sync_vivo() {
     for (int tent = 0; tent < NUM_SYNC; tent++) {
         std::string resp;
-        if (rpc(sync_port(g_sync_atual), "PING", resp, 800) && resp == "PONG")
+        if (rpc(sync_host(g_sync_atual), sync_port(g_sync_atual), "PING", resp, 800) && resp == "PONG")
             return;
         int novo = (g_sync_atual + 1) % NUM_SYNC;
         logmsg(TAG, "[FALHA MASCARADA] Sync " + std::to_string(g_sync_atual)
@@ -53,7 +53,7 @@ static bool escrever(const std::string& item, const std::string& valor,
         std::string resp;
         std::string req = "W1|" + std::to_string(MEU_ID) + "|" + item + "|" + valor
                           + "|" + reqid;
-        if (rpc(sync_port(g_sync_atual), req, resp, 8000)) {
+        if (rpc(sync_host(g_sync_atual), sync_port(g_sync_atual), req, resp, 8000)) {
             auto p = split(resp);
             if (p[0] == "W3" && p.size() >= 3) {
                 logmsg(TAG, "W3 recebido: escrita de " + item + " concluida (v" + p[2]

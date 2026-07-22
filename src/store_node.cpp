@@ -38,7 +38,7 @@ static void propagar_e_verificar(const std::string& item, const std::string& val
         std::string resp;
         logmsg(TAG, "W4: dizendo ao backup Store " + std::to_string(i)
                     + " para atualizar " + item + " (v" + std::to_string(versao) + ")");
-        if (rpc(store_port(i), req, resp) && split(resp)[0] == "ACK_UPDATE") {
+        if (rpc(store_host(i), store_port(i), req, resp) && split(resp)[0] == "ACK_UPDATE") {
             logmsg(TAG, "W5: Store " + std::to_string(i)
                         + " reconheceu a atualizacao de " + item);
             saudaveis.push_back(i);
@@ -52,7 +52,7 @@ static void propagar_e_verificar(const std::string& item, const std::string& val
     bool ok = true;
     for (int i : saudaveis) {
         std::string resp;
-        if (!rpc(store_port(i), "READ|" + item, resp)) { ok = false; continue; }
+        if (!rpc(store_host(i), store_port(i), "READ|" + item, resp)) { ok = false; continue; }
         auto p = split(resp); // VALUE|item|valor|versao
         if (p.size() < 4 || p[2] != valor || std::stol(p[3]) != versao) ok = false;
     }
@@ -76,7 +76,7 @@ static void assumir_primaria(const std::string& item) {
                 + std::to_string(antigo) + ") para o novo primario (Store "
                 + std::to_string(MEU_ID) + ")");
     std::string resp;
-    if (rpc(store_port(antigo),
+    if (rpc(store_host(antigo), store_port(antigo),
             "TRANSFER|" + item + "|" + std::to_string(MEU_ID), resp)) {
         auto p = split(resp); // ITEM|item|valor|versao
         if (p.size() >= 4) {
@@ -95,7 +95,7 @@ static void assumir_primaria(const std::string& item) {
     for (int i = 0; i < NUM_STORE; i++) {
         if (i == MEU_ID || i == antigo) continue;
         std::string r;
-        rpc(store_port(i), "NEWPRIM|" + item + "|" + std::to_string(MEU_ID), r, 500);
+        rpc(store_host(i), store_port(i), "NEWPRIM|" + item + "|" + std::to_string(MEU_ID), r, 500);
     }
 }
 

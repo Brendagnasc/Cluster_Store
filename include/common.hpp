@@ -5,11 +5,13 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <string>
@@ -30,6 +32,17 @@ constexpr int MONITOR_PORT = 7000; // monitor web recebe copia dos logs via UDP
 inline int sync_port(int id)  { return SYNC_BASE_PORT + id; }
 inline int store_port(int id) { return STORE_BASE_PORT + id; }
 
+// Modo Docker: com a variavel de ambiente DOCKER_MODE definida, cada no vive em
+// um container e e alcancado pelo hostname do servico (sync0, store1, monitor).
+// Sem ela, tudo roda local em 127.0.0.1 (modo original).
+inline bool modo_docker() {
+    static bool v = std::getenv("DOCKER_MODE") != nullptr;
+    return v;
+}
+inline std::string sync_host(int id)  { return modo_docker() ? "sync"  + std::to_string(id) : "127.0.0.1"; }
+inline std::string store_host(int id) { return modo_docker() ? "store" + std::to_string(id) : "127.0.0.1"; }
+inline std::string monitor_host()     { return modo_docker() ? "monitor" : "127.0.0.1"; }
+
 // ---------------- Logging ----------------
 inline std::string timestamp() {
     using namespace std::chrono;
@@ -44,15 +57,22 @@ inline std::string timestamp() {
 }
 
 // Envia uma copia da linha de log ao monitor web (UDP, fire and forget:
-// se nao houver monitor rodando, o pacote e simplesmente descartado pelo SO).
+// se nao houver monitor rodando, o pacote e simplesmente descartado).
 inline void monitor_send(const std::string& linha) {
     static int fd = -1;
     static sockaddr_in addr{};
-    if (fd < 0) {
-        fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-        addr.sin_family = AF_INET;
-        addr.sin_port   = htons(MONITOR_PORT);
-        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    static bool resolvido = false;
+    if (!resolvido) {
+        resolvido = true;
+        addrinfo hints{}, *res = nullptr;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(monitor_host().c_str(), std::to_string(MONITOR_PORT).c_str(),
+                        &hints, &res) == 0 && res) {
+            addr = *(sockaddr_in*)res->ai_addr;
+            freeaddrinfo(res);
+            fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        }
     }
     if (fd >= 0)
         ::sendto(fd, linha.data(), linha.size(), 0, (sockaddr*)&addr, sizeof(addr));
@@ -78,14 +98,18 @@ inline std::vector<std::string> split(const std::string& s, char sep = '|') {
 }
 
 // ---------------- Sockets ----------------
-// Conecta em 127.0.0.1:port com timeout (connect nao bloqueante + select).
-inline int tcp_connect(int port, int timeout_ms = TIMEOUT_MS) {
+// Conecta em host:port com timeout (resolve o hostname e usa connect nao
+// bloqueante + select para detectar no fora do ar).
+inline int tcp_connect(const std::string& host, int port, int timeout_ms = TIMEOUT_MS) {
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res)
+        return -1;
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (fd < 0) { freeaddrinfo(res); return -1; }
+    sockaddr_in addr = *(sockaddr_in*)res->ai_addr;
+    freeaddrinfo(res);
 
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
@@ -130,9 +154,9 @@ inline bool recv_line(int fd, std::string& out) {
 }
 
 // Requisicao-resposta simples: conecta, envia, recebe uma linha, fecha.
-inline bool rpc(int port, const std::string& req, std::string& resp,
-                int timeout_ms = TIMEOUT_MS) {
-    int fd = tcp_connect(port, timeout_ms);
+inline bool rpc(const std::string& host, int port, const std::string& req,
+                std::string& resp, int timeout_ms = TIMEOUT_MS) {
+    int fd = tcp_connect(host, port, timeout_ms);
     if (fd < 0) return false;
     bool ok = send_line(fd, req) && recv_line(fd, resp);
     ::close(fd);

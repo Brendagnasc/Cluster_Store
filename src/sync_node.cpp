@@ -44,7 +44,7 @@ static void atender(int conn) {
                         + std::to_string(alvo) + " (novo primario desejado)");
             std::string req = "WRITE|" + item + "|" + valor + "|" + reqid + "|"
                               + std::to_string(MEU_ID);
-            if (rpc(store_port(alvo), req, resp, 4000)
+            if (rpc(store_host(alvo), store_port(alvo), req, resp, 4000)
                 && split(resp)[0] == "ACK_WRITE") {
                 ok = true;
             } else {
