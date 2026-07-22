@@ -1,5 +1,7 @@
 # TP3 (BCC362, Sistemas Distribuídos): Replicação e Tolerância a Falhas
 
+Aluna: Brenda (Matrícula 24.1.4011)
+
 Sistema de replicação com primário dinâmico (Protocolo 2) e tolerância a falhas por queda ou omissão, implementado em C++17 com sockets POSIX e threads, sem middlewares.
 
 ## Arquitetura
@@ -88,7 +90,8 @@ Execução manual (um terminal por processo), se preferir demonstrar ao vivo:
 ```bash
 ./bin/store_node 0     # idem para 1 e 2
 ./bin/sync_node 0      # idem para 1 a 4
-./bin/client 0 10      # cliente 0, 10 operações
+./bin/client 0          # cliente 0, operando continuamente
+./bin/client 0 10       # ou, se preferir, um numero fixo de operacoes (aqui, 10)
 ```
 
 ## O que observar nos logs
