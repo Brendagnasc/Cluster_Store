@@ -83,6 +83,10 @@ int main(int argc, char** argv) {
     logmsg(TAG, "Iniciado. Sync conhecido: Sync " + std::to_string(g_sync_atual)
                 + (infinito ? " (operando continuamente)" : ""));
 
+    // Aquecimento: da tempo de todos os nos abrirem as portas, evitando
+    // failovers falsos na partida (o depends_on do Docker nao espera o bind).
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
     for (int k = 1; infinito || k <= total_ops; k++) {
         std::string item  = item_aleatorio();
         std::string valor = "c" + std::to_string(MEU_ID) + "_op" + std::to_string(k);

@@ -280,13 +280,13 @@ function pintarContadores() {
 // ============ Parser dos logs reais do sistema C++ ============
 function processar(linha) {
   const cab = linha.match(/^\[[^\]]+\]\[(Cliente|Sync|Store|painel) (?:(\d+)\] )?(.*)$/s) ||
-              linha.match(/^\[[^\]]+\]\[(painel)\] (.*)$/s);
+              linha.match(/^\[[^\]]+\]\[(painel|saude)\] (.*)$/s);
   if (!cab) { log(linha, 'l-ts'); return; }
 
-  // linhas sinteticas do proprio painel (falhas injetadas pelo operador)
-  if (cab[1] === 'painel') {
+  // linhas sinteticas do monitor: falhas injetadas e verificador de saude
+  if (cab[1] === 'painel' || cab[1] === 'saude') {
     const msg = cab[3] !== undefined ? cab[3] : cab[2];
-    log(linha, msg.includes('Falha') ? 'l-falha' : 'l-ok');
+    log(linha, msg.includes('Falha') || msg.includes('sem resposta') ? 'l-falha' : 'l-ok');
     let m;
     if ((m = msg.match(/Falha por QUEDA injetada em (Sync|Store) (\d+)/)))
       marcarEstado(m[1] === 'Sync' ? 'sync' : 'store', +m[2], 'queda');
@@ -294,6 +294,10 @@ function processar(linha) {
       marcarEstado(m[1] === 'Sync' ? 'sync' : 'store', +m[2], 'omissao');
     else if ((m = msg.match(/(Sync|Store) (\d+) (?:reativado|relancado)/)))
       marcarEstado(m[1] === 'Sync' ? 'sync' : 'store', +m[2], 'ativo');
+    else if ((m = msg.match(/(Sync|Store) (\d+) ativo/)))
+      marcarEstado(m[1] === 'Sync' ? 'sync' : 'store', +m[2], 'ativo');
+    else if ((m = msg.match(/(Sync|Store) (\d+) sem resposta/)))
+      marcarEstado(m[1] === 'Sync' ? 'sync' : 'store', +m[2], 'falha');
     return;
   }
 

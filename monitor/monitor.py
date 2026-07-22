@@ -137,6 +137,47 @@ def udp_loop():
         _broadcast(data.decode("utf-8", "replace"))
 
 
+# ---------------- Verificador de saude ----------------
+# O painel nao pode depender so dos logs para saber quem esta vivo: um no
+# ocioso nao emite nada e pareceria morto. Este loop faz um PING TCP real em
+# cada Sync e Store a cada 2 s e avisa o painel quando o estado muda.
+def _host_de(tipo, nid):
+    return f"{tipo}{nid}" if DOCKER_MODE else "127.0.0.1"
+
+
+def _porta_de(tipo, nid):
+    return (8001 if tipo == "sync" else 9001) + nid
+
+
+def _ping_no(tipo, nid):
+    try:
+        s = socket.create_connection((_host_de(tipo, nid), _porta_de(tipo, nid)), timeout=1)
+        s.settimeout(1)
+        s.sendall(b"PING\n")
+        dado = s.recv(16)
+        s.close()
+        return dado.startswith(b"PONG")
+    except OSError:
+        return False
+
+
+def saude_loop():
+    estado = {}
+    time.sleep(3)   # da tempo do cluster subir antes da primeira rodada
+    while True:
+        for tipo, total in (("sync", 5), ("store", 3)):
+            for i in range(total):
+                ok = _ping_no(tipo, i)
+                if estado.get((tipo, i)) != ok:
+                    estado[(tipo, i)] = ok
+                    nome = f"{'Sync' if tipo == 'sync' else 'Store'} {i}"
+                    if ok:
+                        _broadcast(f"[{_ts()}][saude] {nome} ativo")
+                    else:
+                        _broadcast(f"[{_ts()}][saude] {nome} sem resposta")
+        time.sleep(2)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):  # silencia o log de acesso do http.server
         pass
@@ -202,5 +243,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=udp_loop, daemon=True).start()
+    threading.Thread(target=saude_loop, daemon=True).start()
     print(f"Monitor no ar: http://localhost:{HTTP_PORT}  (recebendo eventos em UDP {UDP_PORT})")
     http.server.ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Handler).serve_forever()
