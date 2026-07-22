@@ -35,6 +35,8 @@ Após W5, o primário executa um **teste de consistência**: lê o item em todas
 ```
 tp3-cluster-store/
 ├── Makefile
+├── Dockerfile            (imagem dos nos C++)
+├── docker-compose.yml    (1 monitor, 3 Stores, 5 Syncs, 5 Clientes)
 ├── README.md
 ├── .gitignore
 ├── include/
@@ -45,7 +47,8 @@ tp3-cluster-store/
 │   └── store_node.cpp    (Cluster Store: W2, W4, W5, consistência)
 ├── monitor/
 │   ├── monitor.py        (servidor do painel: UDP -> SSE, só stdlib do Python 3)
-│   └── dashboard.html    (painel no navegador com os eventos reais)
+│   ├── dashboard.html    (painel no navegador com os eventos reais)
+│   └── Dockerfile        (imagem do monitor)
 ├── scripts/
 │   ├── run_all.sh        (sobe tudo, incluindo o monitor, com logs em logs/)
 │   ├── kill_node.sh      (simula queda ou omissão de um nó)
@@ -61,7 +64,37 @@ O painel em `http://localhost:8080` mostra: a topologia com os pacotes W1 a W5 a
 
 ## Compilação e execução
 
-Requisitos: Linux (ou WSL), `g++` com C++17 e `make`.
+Há dois modos de execução equivalentes: local (processos no seu terminal) ou Docker Compose (um container por nó). Em ambos, o painel fica em `http://localhost:8080`.
+
+### Modo Docker Compose (recomendado)
+
+Requisitos: Docker com o plugin Compose.
+
+```bash
+# 1. Subir tudo (constroi as imagens na primeira vez)
+docker compose up --build -d
+
+# 2. Abrir o painel ao vivo
+#    http://localhost:8080
+
+# 3. Injetar falhas: clique nos nós do painel, ou pelo terminal:
+docker compose kill sync0        # queda
+docker compose pause store1      # omissão (container vivo, porém congelado)
+docker compose unpause store1    # sai da omissão
+docker compose start sync0       # religa após a queda
+
+# 4. Acompanhar os logs de todos os containers (opcional)
+docker compose logs -f
+
+# 5. Encerrar tudo
+docker compose down
+```
+
+No modo Docker, cada nó é um container (tp3-sync0, tp3-store1, ...) e a comunicação usa os hostnames da rede do Compose. O painel injeta as falhas pela API do Docker (via /var/run/docker.sock montado no monitor): queda = kill do container, omissão = pause, reativar = unpause ou start.
+
+### Modo local (sem Docker)
+
+Requisitos: Linux (ou WSL), `g++` com C++17, `make` e Python 3.
 
 ```bash
 # 1. Compilar
