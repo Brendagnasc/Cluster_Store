@@ -70,7 +70,7 @@
     <div class="legenda">
       <b>W1</b> requisição de escrita &nbsp;•&nbsp; <b>W2</b> move item ao novo primário &nbsp;•&nbsp;
       <b>W3</b> reconhece escrita concluída &nbsp;•&nbsp; <b>W4</b> atualiza backups &nbsp;•&nbsp; <b>W5</b> reconhece atualização.<br>
-      Injete falhas pelo terminal: <code>./scripts/kill_node.sh sync 0</code> (queda) ou <code>./scripts/kill_node.sh store 1 omissao</code>.
+      <b>Clique em um Sync ou Store</b> para derrubar (queda real, kill -9), silenciar (omissão real, SIGSTOP) ou reativar o processo.
     </div>
   </div>
 
@@ -95,8 +95,9 @@ const CORES = { cliente: '#f5b942', sync: '#4fc3e8', store: '#a78bfa', ok: '#4ad
 
 // ============ Estado espelhado a partir dos logs reais ============
 let escritas = 0, mascaradas = 0;
-const syncVivo  = Array(N_SYNC).fill(true);
-const storeVivo = Array(N_STORE).fill(true);
+// 'ativo' | 'queda' | 'omissao' (injetadas pelo painel) | 'falha' (detectada nos logs)
+const syncEstado  = Array(N_SYNC).fill('ativo');
+const storeEstado = Array(N_STORE).fill('ativo');
 const dados = Array.from({length: N_STORE}, () =>
   Object.fromEntries(ITENS.map(it => [it, { valor: '0', versao: 0 }])));
 const primario = Object.fromEntries(ITENS.map(it => [it, 0]));
@@ -155,26 +156,82 @@ function no(tipo, i) {
     const c = el('text', { y: -r - 8, 'text-anchor': 'middle', fill: CORES.ok, 'font-size': 10, class: 'prims' }, g);
     c.textContent = '';
   }
+  if (tipo !== 'cli') {
+    g.style.cursor = 'pointer';
+    g.addEventListener('click', ev => { ev.stopPropagation(); abrirMenu(tipo, i, ev); });
+  }
   return g;
 }
 function pintarNo(tipo, i) {
   const g = gruposNo[tipo][i];
   if (!g || tipo === 'cli') return;
-  const vivo = tipo === 'sync' ? syncVivo[i] : storeVivo[i];
+  const estado = tipo === 'sync' ? syncEstado[i] : storeEstado[i];
   const corpo = g.querySelector('.corpo');
   const rot = g.querySelector('.estado');
   const corBase = tipo === 'sync' ? CORES.sync : CORES.store;
-  corpo.setAttribute('stroke', vivo ? corBase : CORES.falha);
-  g.style.opacity = vivo ? 1 : 0.45;
-  rot.textContent = vivo ? 'ativo' : 'SEM RESPOSTA';
+  if (estado === 'ativo') {
+    corpo.setAttribute('stroke', corBase);
+    corpo.setAttribute('stroke-dasharray', '');
+    g.style.opacity = 1; rot.textContent = 'ativo';
+  } else if (estado === 'queda') {
+    corpo.setAttribute('stroke', CORES.falha);
+    corpo.setAttribute('stroke-dasharray', '');
+    g.style.opacity = 0.45; rot.textContent = 'QUEDA';
+  } else if (estado === 'omissao') {
+    corpo.setAttribute('stroke', '#7d8aa0');
+    corpo.setAttribute('stroke-dasharray', '5 4');
+    g.style.opacity = 0.7; rot.textContent = 'OMISSÃO';
+  } else { // 'falha' detectada nos logs, sem saber o tipo
+    corpo.setAttribute('stroke', CORES.falha);
+    corpo.setAttribute('stroke-dasharray', '');
+    g.style.opacity = 0.45; rot.textContent = 'SEM RESPOSTA';
+  }
 }
-function marcarVivo(tipo, i, vivo) {
-  const arr = tipo === 'sync' ? syncVivo : storeVivo;
-  if (i < 0 || i >= arr.length || arr[i] === vivo) return;
-  arr[i] = vivo;
+function marcarEstado(tipo, i, estado) {
+  const arr = tipo === 'sync' ? syncEstado : storeEstado;
+  if (i < 0 || i >= arr.length || arr[i] === estado) return;
+  // deteccao generica nos logs nao sobrescreve queda/omissao ja conhecidas
+  if (estado === 'falha' && (arr[i] === 'queda' || arr[i] === 'omissao')) return;
+  arr[i] = estado;
   pintarNo(tipo, i);
   pintarTabela();
 }
+
+// ---- menu de injecao de falhas (executa no processo real via POST /fail) ----
+const menu = document.createElement('div');
+menu.style.cssText = 'position:fixed; display:none; z-index:10; background:var(--panel);' +
+  'border:1px solid var(--border); border-radius:8px; padding:8px; min-width:150px;' +
+  'box-shadow:0 8px 24px rgba(0,0,0,0.5);';
+document.body.appendChild(menu);
+document.addEventListener('click', () => { menu.style.display = 'none'; });
+function abrirMenu(tipo, i, ev) {
+  const nome = (tipo === 'sync' ? 'Sync ' : 'Store ') + i;
+  menu.innerHTML =
+    `<div style="font-size:11px;color:var(--muted);padding:2px 6px 6px;">${nome}</div>` +
+    botaoMenu(tipo, i, 'queda',    'Derrubar (queda)') +
+    botaoMenu(tipo, i, 'omissao',  'Silenciar (omissão)') +
+    botaoMenu(tipo, i, 'reativar', 'Reativar');
+  menu.style.left = Math.min(ev.clientX, window.innerWidth - 180) + 'px';
+  menu.style.top = ev.clientY + 'px';
+  menu.style.display = 'block';
+}
+function botaoMenu(tipo, i, modo, rotulo) {
+  return `<button style="display:block;width:100%;text-align:left;margin:2px 0;" ` +
+         `onclick="injetar('${tipo}',${i},'${modo}')">${rotulo}</button>`;
+}
+async function injetar(tipo, i, modo) {
+  menu.style.display = 'none';
+  try {
+    const r = await fetch('/fail', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tipo, id: i, modo }) });
+    const dado = await r.json();
+    if (!dado.ok && dado.erro) log(`[--:--:--.---][painel] ${dado.erro}`, 'l-falha');
+  } catch (e) {
+    log('[--:--:--.---][painel] Falha ao falar com o monitor.', 'l-falha');
+  }
+}
+window.injetar = injetar;
 function pintarPrimarios() {
   for (let s = 0; s < N_STORE; s++) {
     const meus = ITENS.filter(it => primario[it] === s);
@@ -207,7 +264,7 @@ function pintarTabela() {
       const d = dados[s][it];
       const marca = primario[it] === s ? ' <span class="prim">●</span>' : '';
       let cls = '';
-      if (!storeVivo[s]) cls = 'fora-td';
+      if (storeEstado[s] !== 'ativo') cls = 'fora-td';
       else if (d.versao < vmax) cls = 'desatual';
       html += `<td class="${cls}">${d.valor}@v${d.versao}${marca}</td>`;
     }
@@ -222,8 +279,24 @@ function pintarContadores() {
 
 // ============ Parser dos logs reais do sistema C++ ============
 function processar(linha) {
-  const cab = linha.match(/^\[[^\]]+\]\[(Cliente|Sync|Store) (\d+)\] (.*)$/s);
+  const cab = linha.match(/^\[[^\]]+\]\[(Cliente|Sync|Store|painel) (?:(\d+)\] )?(.*)$/s) ||
+              linha.match(/^\[[^\]]+\]\[(painel)\] (.*)$/s);
   if (!cab) { log(linha, 'l-ts'); return; }
+
+  // linhas sinteticas do proprio painel (falhas injetadas pelo operador)
+  if (cab[1] === 'painel') {
+    const msg = cab[3] !== undefined ? cab[3] : cab[2];
+    log(linha, msg.includes('Falha') ? 'l-falha' : 'l-ok');
+    let m;
+    if ((m = msg.match(/Falha por QUEDA injetada em (Sync|Store) (\d+)/)))
+      marcarEstado(m[1] === 'Sync' ? 'sync' : 'store', +m[2], 'queda');
+    else if ((m = msg.match(/Falha por OMISSAO injetada em (Sync|Store) (\d+)/)))
+      marcarEstado(m[1] === 'Sync' ? 'sync' : 'store', +m[2], 'omissao');
+    else if ((m = msg.match(/(Sync|Store) (\d+) (?:reativado|relancado)/)))
+      marcarEstado(m[1] === 'Sync' ? 'sync' : 'store', +m[2], 'ativo');
+    return;
+  }
+
   const tipo = cab[1], id = parseInt(cab[2]), msg = cab[3];
   const cls = msg.includes('[FALHA') ? 'l-falha'
             : msg.includes('[CONSISTENCIA] OK') ? 'l-ok'
@@ -231,8 +304,8 @@ function processar(linha) {
   log(linha, cls);
 
   // quem emitiu um log esta vivo
-  if (tipo === 'Sync')  marcarVivo('sync', id, true);
-  if (tipo === 'Store') marcarVivo('store', id, true);
+  if (tipo === 'Sync')  marcarEstado('sync', id, 'ativo');
+  if (tipo === 'Store') marcarEstado('store', id, 'ativo');
 
   let m;
   if (tipo === 'Cliente') {
@@ -243,7 +316,7 @@ function processar(linha) {
       escritas++; pintarContadores();
     }
     else if ((m = msg.match(/\[FALHA MASCARADA\] Sync (\d+)/))) {
-      marcarVivo('sync', +m[1], false);
+      marcarEstado('sync', +m[1], 'falha');
       mascaradas++; pintarContadores();
     }
 
@@ -251,7 +324,7 @@ function processar(linha) {
     if ((m = msg.match(/Encaminhando escrita de (R\d) ao Store (\d+)/)))
       pacote(pos.sync[id], pos.store[+m[2]], 'W', CORES.sync);
     else if ((m = msg.match(/\[FALHA DETECTADA\] Store (\d+)/)))
-      marcarVivo('store', +m[1], false);
+      marcarEstado('store', +m[1], 'falha');
 
   } else if (tipo === 'Store') {
     if ((m = msg.match(/W2: movendo item (R\d) do primario antigo \(Store (\d+)\) para o novo primario \(Store (\d+)\)/))) {
@@ -279,7 +352,7 @@ function processar(linha) {
       pintarPrimarios(); pintarTabela();
     }
     else if ((m = msg.match(/\[FALHA DETECTADA\] (?:Primario antigo )?Store (\d+)/)))
-      marcarVivo('store', +m[1], false);
+      marcarEstado('store', +m[1], 'falha');
   }
 }
 
