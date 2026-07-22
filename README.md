@@ -1,7 +1,5 @@
 # TP3 (BCC362, Sistemas Distribuídos): Replicação e Tolerância a Falhas
 
-Aluna: Brenda (Matrícula 24.1.4011)
-
 Sistema de replicação com primário dinâmico (Protocolo 2) e tolerância a falhas por queda ou omissão, implementado em C++17 com sockets POSIX e threads, sem middlewares.
 
 ## Arquitetura
@@ -43,12 +41,21 @@ tp3-cluster-store/
 │   ├── client.cpp        (Cliente: W1, PING, failover transparente)
 │   ├── sync_node.cpp     (Cluster Sync: W1 -> Store, W3 ao cliente)
 │   └── store_node.cpp    (Cluster Store: W2, W4, W5, consistência)
+├── monitor/
+│   ├── monitor.py        (servidor do painel: UDP -> SSE, só stdlib do Python 3)
+│   └── dashboard.html    (painel no navegador com os eventos reais)
 ├── scripts/
-│   ├── run_all.sh        (sobe tudo com logs em logs/)
+│   ├── run_all.sh        (sobe tudo, incluindo o monitor, com logs em logs/)
 │   ├── kill_node.sh      (simula queda ou omissão de um nó)
 │   └── stop_all.sh       (encerra todos os processos)
 └── logs/                 (gerado em execução, ignorado pelo git)
 ```
+
+## Monitor web (painel ao vivo)
+
+Cada `logmsg` dos nós C++ envia uma cópia da linha por UDP (porta 7000) ao monitor, um servidor Python de biblioteca padrão que retransmite os eventos ao navegador via Server-Sent Events. O envio é fire and forget: se o monitor não estiver rodando, o sistema funciona normalmente e nada é perdido no protocolo.
+
+O painel em `http://localhost:8080` mostra: a topologia com os pacotes W1 a W5 animados conforme os eventos reais chegam, a tabela de réplicas (valor@versão por Store, com o primário de cada item migrando ao vivo), o terminal unificado e os contadores de escritas concluídas e falhas mascaradas. Quando um nó cai ou entra em omissão, ele é marcado como SEM RESPOSTA assim que a falha é detectada nos logs, e volta a ativo quando emite eventos de novo.
 
 ## Compilação e execução
 
@@ -58,11 +65,12 @@ Requisitos: Linux (ou WSL), `g++` com C++17 e `make`.
 # 1. Compilar
 make
 
-# 2. Subir o sistema completo (3 Stores, 5 Syncs, 5 Clientes)
+# 2. Subir o sistema completo (monitor, 3 Stores, 5 Syncs, 5 Clientes)
 ./scripts/run_all.sh
 
-# 3. Acompanhar os logs em outro terminal
-tail -f logs/*.log
+# 3. Abrir o painel ao vivo no navegador
+#    http://localhost:8080
+#    (ou acompanhar pelo terminal: tail -f logs/*.log)
 
 # 4. Simular a queda do Sync 0 (cenário exigido)
 ./scripts/kill_node.sh sync 0
