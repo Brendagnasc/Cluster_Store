@@ -1,0 +1,94 @@
+# docker-compose.yml
+# Sistema completo do TP3 em containers: 1 monitor, 3 Stores, 5 Syncs, 5 Clientes.
+# Cada no e alcancado pelo hostname do servico (sync0, store1, ...).
+# Painel ao vivo: http://localhost:8080
+#
+# Falhas pelo terminal (alem do painel):
+#   docker compose kill sync0        -> queda
+#   docker compose pause store1      -> omissao (container vivo, porem congelado)
+#   docker compose unpause store1    -> sai da omissao
+#   docker compose start sync0       -> religa apos a queda
+
+x-node: &node
+  build: .
+  environment:
+    - DOCKER_MODE=1
+
+services:
+  monitor:
+    build:
+      context: .
+      dockerfile: monitor/Dockerfile
+    container_name: tp3-monitor
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # para o painel injetar falhas
+
+  store0:
+    <<: *node
+    container_name: tp3-store0
+    command: ./bin/store_node 0
+    depends_on: [monitor]
+  store1:
+    <<: *node
+    container_name: tp3-store1
+    command: ./bin/store_node 1
+    depends_on: [monitor]
+  store2:
+    <<: *node
+    container_name: tp3-store2
+    command: ./bin/store_node 2
+    depends_on: [monitor]
+
+  sync0:
+    <<: *node
+    container_name: tp3-sync0
+    command: ./bin/sync_node 0
+    depends_on: [monitor, store0, store1, store2]
+  sync1:
+    <<: *node
+    container_name: tp3-sync1
+    command: ./bin/sync_node 1
+    depends_on: [monitor, store0, store1, store2]
+  sync2:
+    <<: *node
+    container_name: tp3-sync2
+    command: ./bin/sync_node 2
+    depends_on: [monitor, store0, store1, store2]
+  sync3:
+    <<: *node
+    container_name: tp3-sync3
+    command: ./bin/sync_node 3
+    depends_on: [monitor, store0, store1, store2]
+  sync4:
+    <<: *node
+    container_name: tp3-sync4
+    command: ./bin/sync_node 4
+    depends_on: [monitor, store0, store1, store2]
+
+  client0:
+    <<: *node
+    container_name: tp3-client0
+    command: ./bin/client 0
+    depends_on: [sync0, sync1, sync2, sync3, sync4]
+  client1:
+    <<: *node
+    container_name: tp3-client1
+    command: ./bin/client 1
+    depends_on: [sync0, sync1, sync2, sync3, sync4]
+  client2:
+    <<: *node
+    container_name: tp3-client2
+    command: ./bin/client 2
+    depends_on: [sync0, sync1, sync2, sync3, sync4]
+  client3:
+    <<: *node
+    container_name: tp3-client3
+    command: ./bin/client 3
+    depends_on: [sync0, sync1, sync2, sync3, sync4]
+  client4:
+    <<: *node
+    container_name: tp3-client4
+    command: ./bin/client 4
+    depends_on: [sync0, sync1, sync2, sync3, sync4]
