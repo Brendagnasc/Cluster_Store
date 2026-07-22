@@ -9,9 +9,9 @@
 
 import http.server
 import json
+import os
 import pathlib
 import queue
-import signal
 import socket
 import subprocess
 import threading
@@ -20,6 +20,8 @@ import time
 UDP_PORT = 7000
 HTTP_PORT = 8080
 RAIZ = pathlib.Path(__file__).resolve().parent.parent   # raiz do projeto
+DOCKER_MODE = os.environ.get("DOCKER_MODE") is not None
+DOCKER_SOCK = "/var/run/docker.sock"
 
 _lock = threading.Lock()
 _assinantes = []     # filas dos navegadores conectados
@@ -46,9 +48,61 @@ def _pid_de(tipo, nid):
     return pids[0] if pids else None
 
 
+class _ConexaoDocker(http.client.HTTPConnection):
+    """Conexao HTTP sobre o unix socket do Docker (so biblioteca padrao)."""
+    def __init__(self):
+        super().__init__("localhost")
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(DOCKER_SOCK)
+        self.sock = s
+
+
+def _docker_api(caminho, metodo="POST"):
+    c = _ConexaoDocker()
+    c.request(metodo, caminho)
+    r = c.getresponse()
+    corpo = r.read()
+    c.close()
+    return r.status, corpo
+
+
+def _injetar_falha_docker(tipo, nid, modo):
+    """Modo Docker: queda = kill do container, omissao = pause (congelado),
+    reativar = unpause ou start, conforme o estado do container."""
+    nome_c = f"tp3-{tipo}{nid}"
+    nome = f"{'Sync' if tipo == 'sync' else 'Store'} {nid}"
+    if modo == "queda":
+        st, _ = _docker_api(f"/containers/{nome_c}/kill")
+        if st >= 400:
+            return f"{nome} ja esta fora do ar."
+        _broadcast(f"[{_ts()}][painel] Falha por QUEDA injetada em {nome} (docker kill {nome_c}).")
+    elif modo == "omissao":
+        st, _ = _docker_api(f"/containers/{nome_c}/pause")
+        if st >= 400:
+            return f"Nao foi possivel pausar {nome}."
+        _broadcast(f"[{_ts()}][painel] Falha por OMISSAO injetada em {nome} (docker pause: vivo, porem mudo).")
+    elif modo == "reativar":
+        st, corpo = _docker_api(f"/containers/{nome_c}/json", "GET")
+        if st >= 400:
+            return f"Container {nome_c} nao encontrado."
+        estado = json.loads(corpo).get("State", {})
+        if estado.get("Paused"):
+            _docker_api(f"/containers/{nome_c}/unpause")
+            _broadcast(f"[{_ts()}][painel] {nome} reativado (docker unpause: saiu da omissao).")
+        elif not estado.get("Running"):
+            _docker_api(f"/containers/{nome_c}/start")
+            _broadcast(f"[{_ts()}][painel] {nome} relancado apos a queda (docker start).")
+        else:
+            return f"{nome} ja esta ativo."
+    return None
+
+
 def _injetar_falha(tipo, nid, modo):
-    """Aplica a falha real no processo: queda (kill -9), omissao (SIGSTOP)
-    ou reativar (SIGCONT se congelado; relanca o binario se estava morto)."""
+    """Aplica a falha real: no modo Docker via API do Docker; no modo local
+    via sinais no processo (kill -9, SIGSTOP, SIGCONT ou relancamento)."""
+    if DOCKER_MODE:
+        return _injetar_falha_docker(tipo, nid, modo)
     nome = f"{'Sync' if tipo == 'sync' else 'Store'} {nid}"
     pid = _pid_de(tipo, nid)
     if modo == "queda":
@@ -77,7 +131,7 @@ def _injetar_falha(tipo, nid, modo):
 
 def udp_loop():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("127.0.0.1", UDP_PORT))
+    s.bind(("0.0.0.0", UDP_PORT))  # 0.0.0.0: recebe de outros containers no modo Docker
     while True:
         data, _ = s.recvfrom(65535)
         _broadcast(data.decode("utf-8", "replace"))
