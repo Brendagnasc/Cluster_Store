@@ -25,6 +25,7 @@ constexpr int NUM_ITENS  = 5;      // recursos R0..R4
 constexpr int SYNC_BASE_PORT  = 8001;  // Sync i escuta em 8001+i
 constexpr int STORE_BASE_PORT = 9001;  // Store i escuta em 9001+i
 constexpr int TIMEOUT_MS = 1500;   // timeout padrao para detectar queda/omissao
+constexpr int MONITOR_PORT = 7000; // monitor web recebe copia dos logs via UDP
 
 inline int sync_port(int id)  { return SYNC_BASE_PORT + id; }
 inline int store_port(int id) { return STORE_BASE_PORT + id; }
@@ -42,11 +43,28 @@ inline std::string timestamp() {
     return out;
 }
 
+// Envia uma copia da linha de log ao monitor web (UDP, fire and forget:
+// se nao houver monitor rodando, o pacote e simplesmente descartado pelo SO).
+inline void monitor_send(const std::string& linha) {
+    static int fd = -1;
+    static sockaddr_in addr{};
+    if (fd < 0) {
+        fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        addr.sin_family = AF_INET;
+        addr.sin_port   = htons(MONITOR_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    }
+    if (fd >= 0)
+        ::sendto(fd, linha.data(), linha.size(), 0, (sockaddr*)&addr, sizeof(addr));
+}
+
 inline void logmsg(const std::string& quem, const std::string& msg) {
     static std::mutex m;
     std::lock_guard<std::mutex> lk(m);
-    std::printf("[%s][%s] %s\n", timestamp().c_str(), quem.c_str(), msg.c_str());
+    std::string linha = "[" + timestamp() + "][" + quem + "] " + msg;
+    std::printf("%s\n", linha.c_str());
     std::fflush(stdout);
+    monitor_send(linha);
 }
 
 // ---------------- Mensagens ----------------
