@@ -26,9 +26,9 @@ for i in 0 1 2 3 4; do
 done
 sleep 1
 
-echo "Subindo 5 clientes (10 operacoes cada)..."
+echo "Subindo 5 clientes (operando continuamente ate voce parar com stop_all.sh)..."
 for i in 0 1 2 3 4; do
-  ./bin/client $i 10 > logs/client$i.log 2>&1 &
+  ./bin/client $i > logs/client$i.log 2>&1 &
   echo $! >> logs/pids.txt
 done
 

@@ -73,15 +73,17 @@ static bool escrever(const std::string& item, const std::string& valor,
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::fprintf(stderr, "Uso: %s <id 0..4> [ops]\n", argv[0]); return 1; }
+    if (argc < 2) { std::fprintf(stderr, "Uso: %s <id 0..4> [ops, 0 = infinito]\n", argv[0]); return 1; }
     MEU_ID = std::atoi(argv[1]);
-    int total_ops = (argc >= 3) ? std::atoi(argv[2]) : 10;
+    int total_ops = (argc >= 3) ? std::atoi(argv[2]) : 0;   // padrao: infinito
+    bool infinito = (total_ops <= 0);
     TAG = "Cliente " + std::to_string(MEU_ID);
     g_sync_atual = MEU_ID % NUM_SYNC;   // cada cliente conhece um Sync inicial
 
-    logmsg(TAG, "Iniciado. Sync conhecido: Sync " + std::to_string(g_sync_atual));
+    logmsg(TAG, "Iniciado. Sync conhecido: Sync " + std::to_string(g_sync_atual)
+                + (infinito ? " (operando continuamente)" : ""));
 
-    for (int k = 1; k <= total_ops; k++) {
+    for (int k = 1; infinito || k <= total_ops; k++) {
         std::string item  = item_aleatorio();
         std::string valor = "c" + std::to_string(MEU_ID) + "_op" + std::to_string(k);
         std::string reqid = "c" + std::to_string(MEU_ID) + "-" + std::to_string(k);
