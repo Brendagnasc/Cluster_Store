@@ -1,7 +1,5 @@
 # TP3 (BCC362, Sistemas Distribuídos): Replicação com Primário Móvel e Tolerância a Falhas
 
-Aluna: Brenda (Matrícula 24.1.4011)
-
 Implementação completa do TP3 com o **Protocolo 2 (cópia primária móvel)**, a **exclusão mútua distribuída do TP2 (Ricart-Agrawala)** entre os elementos do Cluster Sync, e tolerância a **falhas por queda e omissão**, em C++17 com sockets POSIX e threads. Sem middleware; todos os nós são processos independentes que se comunicam exclusivamente por sockets TCP (e UDP apenas para o espelhamento de logs ao monitor, que é observacional e não participa do protocolo). A solução não é apenas multicore: os processos podem rodar em máquinas ou containers distintos (modo Docker Compose incluso).
 
 ## Arquitetura

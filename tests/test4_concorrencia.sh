@@ -15,7 +15,7 @@ done
 wait $CPIDS
 sleep 2
 
-TOTAL=$(grep -hc 'W3 recebido' "$LOGS"/client*.log | paste -sd+ | bc)
+TOTAL=$(grep -h 'W3 recebido' "$LOGS"/client*.log | wc -l)
 afirmar "todas as 20 escritas dos 5 clientes concluidas" \
   bash -c "[ $TOTAL -eq 20 ]"
 

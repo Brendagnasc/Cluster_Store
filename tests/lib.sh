@@ -39,7 +39,7 @@ rodar_cliente() {
 # le item de um store: imprime "valor versao"
 ler_store() {
   local store="$1" item="$2"
-  python3 - "$store" "$item" << 'PYEOF'
+  timeout 2s python3 - "$store" "$item" << 'PYEOF'
 import socket, sys
 store, item = int(sys.argv[1]), sys.argv[2]
 try:

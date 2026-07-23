@@ -17,6 +17,7 @@ struct Item {
     std::string valor = "0";
     long versao = 0;
     std::string ultimo_reqid;   // ultima requisicao de escrita aplicada (dedup de retentativas)
+    long maior_fence = 0;        // maior fencing token aceito para bloquear autorizacoes antigas
 };
 
 static int MEU_ID = -1;
@@ -45,7 +46,7 @@ static int item_idx(const std::string& item) {
 // Executa apos responder ao Sync, caracterizando o protocolo nao bloqueador do
 // Protocolo 2. Chamada com a trava do item ja adquirida pelo chamador.
 static void propagar_e_verificar(const std::string& item, const std::string& valor,
-                                 long versao, const std::string& reqid) {
+                                 long versao, const std::string& reqid, long fence) {
     std::vector<int> saudaveis;
     std::mutex mtx_saudaveis;
     std::vector<std::thread> threads;
@@ -53,7 +54,7 @@ static void propagar_e_verificar(const std::string& item, const std::string& val
         if (i == MEU_ID) continue;
         threads.emplace_back([&, i]() {
             std::string req = "UPDATE|" + item + "|" + valor + "|" + std::to_string(versao)
-                              + "|" + std::to_string(MEU_ID) + "|" + reqid;
+                              + "|" + std::to_string(MEU_ID) + "|" + reqid + "|" + std::to_string(fence);
             std::string resp;
             logmsg(TAG, "W4: dizendo ao backup Store " + std::to_string(i)
                         + " para atualizar " + item + " (v" + std::to_string(versao) + ")");
@@ -102,6 +103,7 @@ static void assumir_primaria(const std::string& item) {
     std::string valor_recebido;
     long versao_recebida = 0;
     std::string reqid_recebido;
+    long fence_recebido = 0;
     for (int hop = 0; hop < NUM_STORE && antigo != MEU_ID; hop++) {
         logmsg(TAG, "W2: pedindo ao Store " + std::to_string(antigo)
                     + " a copia primaria de " + item);
@@ -126,6 +128,7 @@ static void assumir_primaria(const std::string& item) {
                     melhor_v   = std::stol(q[3]);
                     melhor_val = q[2];
                     melhor_rq  = (q.size() >= 6) ? q[5] : "";
+                    fence_recebido = (q.size() >= 7) ? std::stol(q[6]) : 0;
                 }
             }
             if (melhor_v >= 0) {
@@ -147,6 +150,7 @@ static void assumir_primaria(const std::string& item) {
             valor_recebido = p[2];
             versao_recebida = std::stol(p[3]);
             reqid_recebido = p[4];
+            fence_recebido = (p.size() >= 6) ? std::stol(p[5]) : 0;
             obteve = true;
             break;
         } else if (!p.empty() && p[0] == "REDIRECT" && p.size() >= 2) {
@@ -163,6 +167,7 @@ static void assumir_primaria(const std::string& item) {
         it.valor = valor_recebido;
         it.versao = versao_recebida;
         it.ultimo_reqid = reqid_recebido;
+        it.maior_fence = std::max(it.maior_fence, fence_recebido);
     }
     g_primario.at(item) = MEU_ID;
     // Avisa os demais Stores sobre o novo primario (best effort)
@@ -184,12 +189,22 @@ static void atender(int conn) {
         if (cmd == "PING") {
             send_line(conn, "PONG");
 
-        } else if (cmd == "WRITE" && p.size() >= 5) {
-            // WRITE|item|valor|reqid|sync_id  (encaminhado pelo Cluster Sync)
+        } else if (cmd == "WRITE" && p.size() >= 6) {
+            // WRITE|item|valor|reqid|sync_id|fencing_token
             const std::string item = p[1], valor = p[2], reqid = p[3], sync = p[4];
-            std::lock_guard<std::mutex> critica(g_item_mtx[item_idx(item)]);
+            long fence = std::stol(p[5]);
+            std::unique_lock<std::mutex> critica(g_item_mtx[item_idx(item)]);
             assumir_primaria(item);
             Item& it = g_dados.at(item);
+            if (fence < it.maior_fence) {
+                logmsg(TAG, "[FENCE] escrita rejeitada do Sync " + sync +
+                            ": token " + std::to_string(fence) +
+                            " inferior ao maior token " + std::to_string(it.maior_fence));
+                send_line(conn, "ERRO_FENCE|" + item + "|" + std::to_string(it.maior_fence));
+                ::close(conn);
+                return;
+            }
+            it.maior_fence = std::max(it.maior_fence, fence);
             bool duplicada = !reqid.empty() && it.ultimo_reqid == reqid;
             if (!duplicada) {
                 it.valor = valor;
@@ -205,9 +220,12 @@ static void atender(int conn) {
                 logmsg(TAG, "Escrita aplicada localmente como primario: " + item + " = "
                             + valor + " (v" + std::to_string(versao) + ", req " + reqid
                             + ", via Sync " + sync + ")");
+            // Libera a trava antes da propagacao: manter a trava durante RPCs W4
+            // podia formar espera circular entre Stores e aparentar travamento.
+            critica.unlock();
             // Protocolo nao bloqueador: reconhece antes de propagar aos backups
             send_line(conn, "ACK_WRITE|" + item + "|" + std::to_string(versao));
-            if (!duplicada) propagar_e_verificar(item, valor, versao, reqid);
+            if (!duplicada) propagar_e_verificar(item, valor, versao, reqid, fence);
 
         } else if (cmd == "TRANSFER" && p.size() >= 3) {
             // TRANSFER|item|novo_primario
@@ -225,7 +243,8 @@ static void atender(int conn) {
                 logmsg(TAG, "W2: entregando a copia primaria de " + item + " ao Store "
                             + std::to_string(novo) + " (v" + std::to_string(copia.versao) + ")");
                 send_line(conn, "ITEM|" + item + "|" + copia.valor + "|"
-                                + std::to_string(copia.versao) + "|" + copia.ultimo_reqid);
+                                + std::to_string(copia.versao) + "|" + copia.ultimo_reqid + "|"
+                                + std::to_string(copia.maior_fence));
             }
 
         } else if (cmd == "NEWPRIM" && p.size() >= 3) {
@@ -234,12 +253,13 @@ static void atender(int conn) {
             g_primario.at(item) = std::stoi(p[2]);
             send_line(conn, "OK");
 
-        } else if (cmd == "UPDATE" && p.size() >= 6) {
-            // UPDATE|item|valor|versao|primario|reqid  (W4 vindo do primario)
+        } else if (cmd == "UPDATE" && p.size() >= 7) {
+            // UPDATE|item|valor|versao|primario|reqid|fencing_token
             const std::string item = p[1], valor = p[2];
             long versao = std::stol(p[3]);
             int primario_id = std::stoi(p[4]);
             const std::string reqid = p[5];
+            long fence = std::stol(p[6]);
             logmsg(TAG, "W4 recebido do primario Store " + p[4] + ": atualizando backup "
                         + item + " para v" + std::to_string(versao));
             {
@@ -249,6 +269,7 @@ static void atender(int conn) {
                     it.valor = valor;
                     it.versao = versao;
                     it.ultimo_reqid = reqid;
+                    it.maior_fence = std::max(it.maior_fence, fence);
                 }
                 g_primario.at(item) = primario_id;
             }
@@ -267,7 +288,7 @@ static void atender(int conn) {
             }
             send_line(conn, "VALUE|" + item + "|" + copia.valor + "|"
                             + std::to_string(copia.versao) + "|" + std::to_string(primario)
-                            + "|" + copia.ultimo_reqid);
+                            + "|" + copia.ultimo_reqid + "|" + std::to_string(copia.maior_fence));
 
         } else {
             send_line(conn, "ERRO|comando_invalido");
@@ -290,6 +311,7 @@ static void sincronizar_com_cluster() {
         std::string melhor_valor = "0";
         int melhor_primario = 0;
         std::string melhor_reqid;
+        long melhor_fence = 0;
         for (int s = 0; s < NUM_STORE; s++) {
             if (s == MEU_ID) continue;
             std::string resp;
@@ -303,10 +325,11 @@ static void sincronizar_com_cluster() {
                 melhor_valor = p[2];
                 melhor_primario = std::stoi(p[4]);
                 melhor_reqid = (p.size() >= 6) ? p[5] : "";
+                melhor_fence = (p.size() >= 7) ? std::stol(p[6]) : 0;
             }
         }
         if (achou) {
-            g_dados[item] = { melhor_valor, melhor_versao, melhor_reqid };
+            g_dados[item] = { melhor_valor, melhor_versao, melhor_reqid, melhor_fence };
             g_primario[item] = melhor_primario;
             logmsg(TAG, "Estado recuperado de " + item + " junto ao cluster: valor="
                         + melhor_valor + ", v" + std::to_string(melhor_versao)

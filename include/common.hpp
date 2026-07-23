@@ -31,9 +31,9 @@ constexpr int TIMEOUT_MS = 1500;   // timeout padrao para detectar queda/omissao
 constexpr int MONITOR_PORT = 7000; // monitor web recebe copia dos logs via UDP
 
 // ---- Secao critica distribuida (Ricart-Agrawala entre os Syncs) ----
-constexpr int RA_TIMEOUT_MS  = 6000;  // espera maxima por autorizacao de um par
+constexpr int RA_TIMEOUT_MS  = 2000;  // espera maxima por autorizacao de um par
 constexpr int RA_SUSPEITO_MS = 2000;  // espera reduzida para par recem-falho
-constexpr int LEASE_MS       = 10000; // validade da autorizacao de SC (contra
+constexpr int LEASE_MS       = 5000; // validade da autorizacao de SC (contra
                                       // processo retomado com autorizacao antiga)
 
 inline int sync_port(int id)  { return SYNC_BASE_PORT + id; }

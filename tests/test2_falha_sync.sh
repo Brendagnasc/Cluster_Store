@@ -18,8 +18,8 @@ kill -9 $(pgrep -f "bin/sync_node 3$")   # Sync 3 esta ocioso (cliente 0 usa Syn
 wait $CPID
 afirmar "1.1: escritas concluidas com Sync ocioso morto" \
   bash -c "[ \$(grep -c 'W3 recebido' '$LOGS/client0.log') -eq 3 ]"
-afirmar "1.1: SC seguiu sem deadlock (autorizacao presumida do morto)" \
-  bash -c "grep -q 'autorizacao presumida' '$LOGS'/sync*.log || [ \$(grep -c 'W3 recebido' '$LOGS/client0.log') -eq 3 ]"
+afirmar "1.1: SC seguiu sem deadlock apos remover o Sync morto do conjunto ativo" \
+  bash -c "[ \$(grep -c 'W3 recebido' '$LOGS/client0.log') -eq 3 ]"
 limpar_processos
 
 echo "-- caso 1.2: Sync cai apos receber o W1 --"

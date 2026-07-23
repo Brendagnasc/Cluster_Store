@@ -93,7 +93,8 @@ int main(int argc, char** argv) {
         std::string valor = "c" + std::to_string(MEU_ID) + "_op" + std::to_string(k);
         std::string reqid = "c" + std::to_string(MEU_ID) + "-" + std::to_string(k);
         escrever(item, valor, reqid);
-        std::this_thread::sleep_for(std::chrono::milliseconds(intervalo_ms()));
+        if (infinito || k < total_ops)
+            std::this_thread::sleep_for(std::chrono::milliseconds(intervalo_ms()));
     }
     logmsg(TAG, "Finalizado (" + std::to_string(total_ops) + " operacoes).");
     return 0;
