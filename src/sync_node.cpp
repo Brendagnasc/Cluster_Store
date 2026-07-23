@@ -42,14 +42,6 @@ static std::string FALHA_PROGRAMADA;          // "", falhar-apos-w1, falhar-na-s
 static std::atomic<bool> falha_armada{true};  // dispara uma unica vez
 
 // ---------------- Estado do Ricart-Agrawala ----------------
-// ra_meu_ts/ra_interessado/ra_na_sc valem para "o pedido pendente deste
-// processo": o protocolo assume um unico pedido por vez. Como atender() roda
-// uma thread por conexao, duas conexoes concorrentes (dois clientes no mesmo
-// Sync, algo bem provavel logo apos o failover de um Sync derrubado) podem
-// chamar entrar_sc()/sair_sc() ao mesmo tempo e pisar nesse estado global.
-// g_sc_local_mtx serializa entrar_sc()..sair_sc() dentro do processo para que
-// so exista um pedido local por vez, como o algoritmo pressupoe.
-static std::mutex g_sc_local_mtx;
 static std::mutex ra_mtx;
 static std::condition_variable ra_cv;
 static long ra_clock = 0;          // relogio logico de Lamport
@@ -57,13 +49,40 @@ static bool ra_interessado = false;
 static bool ra_na_sc = false;
 static long ra_meu_ts = 0;
 static std::chrono::steady_clock::time_point ra_concedida_em;
-// pares que falharam recentemente ganham espera reduzida (evita pagar o
-// timeout cheio a cada entrada na SC enquanto um par esta em omissao)
-static std::atomic<long long> ra_suspeito_ate[NUM_SYNC];
 
-static long long agora_ms() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+// ---- Heartbeat entre os Syncs ----
+// Cada Sync monitora os pares continuamente (PING a cada 1 s). A entrada na SC
+// consulta esse estado: um par ja sabidamente morto e pulado NA HORA (com a
+// autorizacao presumida registrada), em vez de pagar o timeout a cada entrada.
+// Dois PINGs perdidos seguidos marcam o par como fora; um PING respondido o
+// devolve ao grupo. Todos comecam presumidos vivos (otimista), garantindo que
+// nenhuma autorizacao e pulada indevidamente na partida.
+static std::atomic<bool> par_vivo[NUM_SYNC];
+static std::atomic<int>  par_falhas[NUM_SYNC];
+
+static void registrar_falha_do_par(int j) {
+    if (par_falhas[j].fetch_add(1) + 1 >= 2 && par_vivo[j].exchange(false))
+        logmsg(TAG, "[FALHA DETECTADA] Sync " + std::to_string(j) +
+                    " marcado como fora do ar pelo heartbeat (queda ou omissao)");
+}
+static void registrar_vida_do_par(int j) {
+    par_falhas[j] = 0;
+    if (!par_vivo[j].exchange(true))
+        logmsg(TAG, "Sync " + std::to_string(j) + " voltou a responder ao heartbeat");
+}
+
+static void heartbeat_loop() {
+    while (true) {
+        for (int j = 0; j < NUM_SYNC; j++) {
+            if (j == MEU_ID) continue;
+            std::string resp;
+            if (rpc(sync_host(j), sync_port(j), "PING", resp, 500) && resp == "PONG")
+                registrar_vida_do_par(j);
+            else
+                registrar_falha_do_par(j);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    }
 }
 
 static bool falhar_agora(const char* qual) {
@@ -85,18 +104,21 @@ static void entrar_sc() {
     std::vector<std::thread> pedidos;
     for (int j = 0; j < NUM_SYNC; j++) {
         if (j == MEU_ID) continue;
+        if (!par_vivo[j]) {
+            logmsg(TAG, "Sync " + std::to_string(j) + " fora do ar (heartbeat);"
+                        " autorizacao presumida para evitar deadlock");
+            continue;
+        }
         pedidos.emplace_back([j, ts]() {
-            int espera = (agora_ms() < ra_suspeito_ate[j].load())
-                         ? RA_SUSPEITO_MS : RA_TIMEOUT_MS;
             std::string resp;
             bool ok = rpc(sync_host(j), sync_port(j),
                           "RA_REQ|" + std::to_string(ts) + "|" + std::to_string(MEU_ID),
-                          resp, espera);
+                          resp, RA_TIMEOUT_MS);
             if (ok) {
-                ra_suspeito_ate[j] = 0;
+                registrar_vida_do_par(j);
                 logmsg(TAG, "Sync " + std::to_string(j) + " autorizou minha entrada na SC");
             } else {
-                ra_suspeito_ate[j] = agora_ms() + 5000;
+                par_falhas[j] = 2; par_vivo[j] = false;
                 logmsg(TAG, "[FALHA DETECTADA] Sync " + std::to_string(j) +
                             " sem resposta ao pedido de SC (queda ou omissao);"
                             " autorizacao presumida para evitar deadlock");
@@ -181,11 +203,6 @@ static void atender(int conn) {
                                            (ra_meu_ts == ts && MEU_ID < outro)));
             };
             if (devo_adiar()) {
-                // Espera sem teto: um teto artificial aqui liberaria o par mesmo
-                // com a SC local genuinamente ocupada (uma escrita pode levar
-                // varios segundos sob contencao no Cluster Store), quebrando a
-                // exclusao mutua. Um par que cai de verdade e detectado por quem
-                // ESPERA a resposta (conexao fechada), nao por quem esta adiando.
                 logmsg(TAG, "SC em uso ou com prioridade minha: adiando autorizacao ao Sync "
                             + std::to_string(outro));
                 ra_cv.wait(lk, [&]() { return !devo_adiar(); });
@@ -205,11 +222,7 @@ static void atender(int conn) {
                 std::fflush(stdout); ::_exit(9);
             }
 
-            // Exclusao mutua do TP2: so acessa o Cluster Store dentro da SC.
-            // g_sc_local_mtx garante que, dentro deste processo, so uma
-            // conexao por vez execute entrar_sc()..sair_sc() (ver comentario
-            // junto a declaracao do estado do Ricart-Agrawala acima).
-            std::lock_guard<std::mutex> lk_sc(g_sc_local_mtx);
+            // Exclusao mutua do TP2: so acessa o Cluster Store dentro da SC
             entrar_sc();
             if (falhar_agora("falhar-na-sc")) {
                 logmsg(TAG, "[TESTE] Falha programada: caindo DENTRO da secao critica (caso 1.3)");
@@ -259,12 +272,14 @@ int main(int argc, char** argv) {
     MEU_ID = std::atoi(argv[1]);
     if (argc >= 3) FALHA_PROGRAMADA = argv[2];
     TAG = "Sync " + std::to_string(MEU_ID);
-    for (int i = 0; i < NUM_SYNC; i++) ra_suspeito_ate[i] = 0;
+    for (int i = 0; i < NUM_SYNC; i++) { par_vivo[i] = true; par_falhas[i] = 0; }
+    aquecer_dns();
 
     int srv = tcp_listen(sync_port(MEU_ID));
     if (srv < 0) { logmsg(TAG, "Erro ao abrir porta"); return 1; }
     logmsg(TAG, "Ativo na porta " + std::to_string(sync_port(MEU_ID))
                 + (FALHA_PROGRAMADA.empty() ? "" : " [falha programada: " + FALHA_PROGRAMADA + "]"));
+    std::thread(heartbeat_loop).detach();
 
     while (true) {
         int conn = ::accept(srv, nullptr, nullptr);

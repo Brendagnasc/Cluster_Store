@@ -78,6 +78,7 @@ int main(int argc, char** argv) {
     int total_ops = (argc >= 3) ? std::atoi(argv[2]) : 0;   // padrao: infinito
     bool infinito = (total_ops <= 0);
     TAG = "Cliente " + std::to_string(MEU_ID);
+    aquecer_dns();
     g_sync_atual = MEU_ID % NUM_SYNC;   // cada cliente conhece um Sync inicial
 
     logmsg(TAG, "Iniciado. Sync conhecido: Sync " + std::to_string(g_sync_atual)

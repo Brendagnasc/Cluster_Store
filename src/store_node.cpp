@@ -319,6 +319,7 @@ int main(int argc, char** argv) {
     if (argc < 2) { std::fprintf(stderr, "Uso: %s <id 0..2>\n", argv[0]); return 1; }
     MEU_ID = std::atoi(argv[1]);
     TAG = "Store " + std::to_string(MEU_ID);
+    aquecer_dns();
 
     for (int i = 0; i < NUM_ITENS; i++) {
         g_dados[item_nome(i)] = Item{};
