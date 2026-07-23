@@ -109,7 +109,37 @@ static void assumir_primaria(const std::string& item) {
         if (!rpc(store_host(antigo), store_port(antigo),
                  "TRANSFER|" + item + "|" + std::to_string(MEU_ID), resp)) {
             logmsg(TAG, "[FALHA DETECTADA] Store " + std::to_string(antigo)
-                        + " sem resposta ao W2. Assumindo a primaria com a copia local.");
+                        + " sem resposta ao W2 (queda ou omissao).");
+            // Um Store NAO se autopromove apenas por timeout: consulta as demais
+            // replicas vivas e adota a versao mais recente disponivel. A seguranca
+            // contra dois primarios simultaneos vem da secao critica do Cluster
+            // Sync (Ricart-Agrawala), que serializa as escritas: nunca ha duas
+            // migracoes concorrentes para o mesmo item.
+            long melhor_v = -1;
+            std::string melhor_val, melhor_rq;
+            for (int s = 0; s < NUM_STORE; s++) {
+                if (s == MEU_ID || s == antigo) continue;
+                std::string r2;
+                if (!rpc(store_host(s), store_port(s), "READ|" + item, r2, 800)) continue;
+                auto q = split(r2); // VALUE|item|valor|versao|primario|reqid
+                if (q.size() >= 4 && std::stol(q[3]) > melhor_v) {
+                    melhor_v   = std::stol(q[3]);
+                    melhor_val = q[2];
+                    melhor_rq  = (q.size() >= 6) ? q[5] : "";
+                }
+            }
+            if (melhor_v >= 0) {
+                valor_recebido = melhor_val;
+                versao_recebida = melhor_v;
+                reqid_recebido = melhor_rq;
+                obteve = true;
+                logmsg(TAG, "Assumindo a primaria de " + item + " de forma segura:"
+                            " adotada a versao mais recente entre as replicas vivas (v"
+                            + std::to_string(melhor_v) + "), sob a serializacao da SC do Sync");
+            } else {
+                logmsg(TAG, "Nenhuma outra replica respondeu; assumindo a primaria de "
+                            + item + " com a copia local (unica replica viva), sob a SC do Sync");
+            }
             break;
         }
         auto p = split(resp);
@@ -236,7 +266,8 @@ static void atender(int conn) {
                 primario = g_primario.at(item);
             }
             send_line(conn, "VALUE|" + item + "|" + copia.valor + "|"
-                            + std::to_string(copia.versao) + "|" + std::to_string(primario));
+                            + std::to_string(copia.versao) + "|" + std::to_string(primario)
+                            + "|" + copia.ultimo_reqid);
 
         } else {
             send_line(conn, "ERRO|comando_invalido");
@@ -258,11 +289,12 @@ static void sincronizar_com_cluster() {
         long melhor_versao = -1;
         std::string melhor_valor = "0";
         int melhor_primario = 0;
+        std::string melhor_reqid;
         for (int s = 0; s < NUM_STORE; s++) {
             if (s == MEU_ID) continue;
             std::string resp;
             if (!rpc(store_host(s), store_port(s), "READ|" + item, resp, 800)) continue;
-            auto p = split(resp); // VALUE|item|valor|versao|primario
+            auto p = split(resp); // VALUE|item|valor|versao|primario|reqid
             if (p.size() < 5) continue;
             long v = std::stol(p[3]);
             achou = true;
@@ -270,10 +302,11 @@ static void sincronizar_com_cluster() {
                 melhor_versao = v;
                 melhor_valor = p[2];
                 melhor_primario = std::stoi(p[4]);
+                melhor_reqid = (p.size() >= 6) ? p[5] : "";
             }
         }
         if (achou) {
-            g_dados[item] = { melhor_valor, melhor_versao, "" };
+            g_dados[item] = { melhor_valor, melhor_versao, melhor_reqid };
             g_primario[item] = melhor_primario;
             logmsg(TAG, "Estado recuperado de " + item + " junto ao cluster: valor="
                         + melhor_valor + ", v" + std::to_string(melhor_versao)
@@ -301,6 +334,7 @@ int main(int argc, char** argv) {
     while (true) {
         int conn = ::accept(srv, nullptr, nullptr);
         if (conn < 0) continue;
+        set_conn_timeouts(conn);
         std::thread(atender, conn).detach();
     }
 }
