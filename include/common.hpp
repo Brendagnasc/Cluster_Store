@@ -29,6 +29,12 @@ constexpr int STORE_BASE_PORT = 9001;  // Store i escuta em 9001+i
 constexpr int TIMEOUT_MS = 1500;   // timeout padrao para detectar queda/omissao
 constexpr int MONITOR_PORT = 7000; // monitor web recebe copia dos logs via UDP
 
+// ---- Secao critica distribuida (Ricart-Agrawala entre os Syncs) ----
+constexpr int RA_TIMEOUT_MS  = 6000;  // espera maxima por autorizacao de um par
+constexpr int RA_SUSPEITO_MS = 2000;  // espera reduzida para par recem-falho
+constexpr int LEASE_MS       = 10000; // validade da autorizacao de SC (contra
+                                      // processo retomado com autorizacao antiga)
+
 inline int sync_port(int id)  { return SYNC_BASE_PORT + id; }
 inline int store_port(int id) { return STORE_BASE_PORT + id; }
 
@@ -178,4 +184,12 @@ inline int tcp_listen(int port) {
     if (::bind(fd, (sockaddr*)&addr, sizeof(addr)) < 0) return -1;
     if (::listen(fd, 64) < 0) return -1;
     return fd;
+}
+
+// Aplica timeouts a uma conexao aceita: um par em omissao (congelado) nao pode
+// prender uma thread do servidor para sempre.
+inline void set_conn_timeouts(int fd, int timeout_ms = 30000) {
+    timeval tv{ timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
