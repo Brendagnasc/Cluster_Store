@@ -42,6 +42,14 @@ static std::string FALHA_PROGRAMADA;          // "", falhar-apos-w1, falhar-na-s
 static std::atomic<bool> falha_armada{true};  // dispara uma unica vez
 
 // ---------------- Estado do Ricart-Agrawala ----------------
+// ra_meu_ts/ra_interessado/ra_na_sc valem para "o pedido pendente deste
+// processo": o protocolo assume um unico pedido por vez. Como atender() roda
+// uma thread por conexao, duas conexoes concorrentes (dois clientes no mesmo
+// Sync, algo bem provavel logo apos o failover de um Sync derrubado) podem
+// chamar entrar_sc()/sair_sc() ao mesmo tempo e pisar nesse estado global.
+// g_sc_local_mtx serializa entrar_sc()..sair_sc() dentro do processo para que
+// so exista um pedido local por vez, como o algoritmo pressupoe.
+static std::mutex g_sc_local_mtx;
 static std::mutex ra_mtx;
 static std::condition_variable ra_cv;
 static long ra_clock = 0;          // relogio logico de Lamport
@@ -173,6 +181,11 @@ static void atender(int conn) {
                                            (ra_meu_ts == ts && MEU_ID < outro)));
             };
             if (devo_adiar()) {
+                // Espera sem teto: um teto artificial aqui liberaria o par mesmo
+                // com a SC local genuinamente ocupada (uma escrita pode levar
+                // varios segundos sob contencao no Cluster Store), quebrando a
+                // exclusao mutua. Um par que cai de verdade e detectado por quem
+                // ESPERA a resposta (conexao fechada), nao por quem esta adiando.
                 logmsg(TAG, "SC em uso ou com prioridade minha: adiando autorizacao ao Sync "
                             + std::to_string(outro));
                 ra_cv.wait(lk, [&]() { return !devo_adiar(); });
@@ -192,7 +205,11 @@ static void atender(int conn) {
                 std::fflush(stdout); ::_exit(9);
             }
 
-            // Exclusao mutua do TP2: so acessa o Cluster Store dentro da SC
+            // Exclusao mutua do TP2: so acessa o Cluster Store dentro da SC.
+            // g_sc_local_mtx garante que, dentro deste processo, so uma
+            // conexao por vez execute entrar_sc()..sair_sc() (ver comentario
+            // junto a declaracao do estado do Ricart-Agrawala acima).
+            std::lock_guard<std::mutex> lk_sc(g_sc_local_mtx);
             entrar_sc();
             if (falhar_agora("falhar-na-sc")) {
                 logmsg(TAG, "[TESTE] Falha programada: caindo DENTRO da secao critica (caso 1.3)");
