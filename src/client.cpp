@@ -55,7 +55,7 @@ static bool escrever(const std::string& item, const std::string& valor,
                           + "|" + reqid;
         if (rpc(sync_host(g_sync_atual), sync_port(g_sync_atual), req, resp, 8000)) {
             auto p = split(resp);
-            if (p[0] == "W3" && p.size() >= 3) {
+            if (!p.empty() && p[0] == "W3" && p.size() >= 3) {
                 logmsg(TAG, "W3 recebido: escrita de " + item + " concluida (v" + p[2]
                             + ") via Sync " + std::to_string(g_sync_atual));
                 return true;

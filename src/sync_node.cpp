@@ -23,45 +23,53 @@ static int store_aleatorio() {
 static void atender(int conn) {
     std::string linha;
     if (!recv_line(conn, linha)) { ::close(conn); return; }
-    auto p = split(linha);
-    const std::string& cmd = p[0];
+    try {
+        auto p = split(linha);
+        if (p.empty()) { ::close(conn); return; }
+        const std::string& cmd = p[0];
 
-    if (cmd == "PING") {
-        send_line(conn, "PONG");
+        if (cmd == "PING") {
+            send_line(conn, "PONG");
 
-    } else if (cmd == "W1" && p.size() >= 5) {
-        // W1|cliente|item|valor|reqid
-        const std::string cliente = p[1], item = p[2], valor = p[3], reqid = p[4];
-        logmsg(TAG, "W1: requisicao de escrita recebida do Cliente " + cliente
-                    + " (item=" + item + ", valor=" + valor + ", req " + reqid + ")");
+        } else if (cmd == "W1" && p.size() >= 5) {
+            // W1|cliente|item|valor|reqid
+            const std::string cliente = p[1], item = p[2], valor = p[3], reqid = p[4];
+            logmsg(TAG, "W1: requisicao de escrita recebida do Cliente " + cliente
+                        + " (item=" + item + ", valor=" + valor + ", req " + reqid + ")");
 
-        // Escolhe um Store; em caso de falha, tenta os demais (tolerancia a falhas)
-        int alvo = store_aleatorio();
-        std::string resp;
-        bool ok = false;
-        for (int tent = 0; tent < NUM_STORE && !ok; tent++, alvo = (alvo + 1) % NUM_STORE) {
-            logmsg(TAG, "Encaminhando escrita de " + item + " ao Store "
-                        + std::to_string(alvo) + " (novo primario desejado)");
-            std::string req = "WRITE|" + item + "|" + valor + "|" + reqid + "|"
-                              + std::to_string(MEU_ID);
-            if (rpc(store_host(alvo), store_port(alvo), req, resp, 4000)
-                && split(resp)[0] == "ACK_WRITE") {
-                ok = true;
-            } else {
-                logmsg(TAG, "[FALHA DETECTADA] Store " + std::to_string(alvo)
-                            + " sem resposta (queda ou omissao). Tentando outro Store.");
+            // Escolhe um Store; em caso de falha, tenta os demais (tolerancia a falhas)
+            int alvo = store_aleatorio();
+            std::string resp;
+            bool ok = false;
+            for (int tent = 0; tent < NUM_STORE && !ok; tent++, alvo = (alvo + 1) % NUM_STORE) {
+                logmsg(TAG, "Encaminhando escrita de " + item + " ao Store "
+                            + std::to_string(alvo) + " (novo primario desejado)");
+                std::string req = "WRITE|" + item + "|" + valor + "|" + reqid + "|"
+                                  + std::to_string(MEU_ID);
+                auto respondeu = rpc(store_host(alvo), store_port(alvo), req, resp, 4000);
+                auto r = respondeu ? split(resp) : std::vector<std::string>{};
+                if (respondeu && !r.empty() && r[0] == "ACK_WRITE" && r.size() >= 3) {
+                    ok = true;
+                } else {
+                    logmsg(TAG, "[FALHA DETECTADA] Store " + std::to_string(alvo)
+                                + " sem resposta (queda ou omissao). Tentando outro Store.");
+                }
             }
-        }
 
-        if (ok) {
-            auto r = split(resp); // ACK_WRITE|item|versao
-            logmsg(TAG, "W3: reconhecendo escrita concluida ao Cliente " + cliente
-                        + " (item=" + item + ", v" + r[2] + ")");
-            send_line(conn, "W3|" + item + "|" + r[2]);
+            if (ok) {
+                auto r = split(resp); // ACK_WRITE|item|versao
+                logmsg(TAG, "W3: reconhecendo escrita concluida ao Cliente " + cliente
+                            + " (item=" + item + ", v" + r[2] + ")");
+                send_line(conn, "W3|" + item + "|" + r[2]);
+            } else {
+                logmsg(TAG, "Nenhum Store disponivel para " + item);
+                send_line(conn, "ERRO|store_indisponivel");
+            }
         } else {
-            logmsg(TAG, "Nenhum Store disponivel para " + item);
-            send_line(conn, "ERRO|store_indisponivel");
+            send_line(conn, "ERRO|comando_invalido");
         }
+    } catch (const std::exception& e) {
+        logmsg(TAG, "[ERRO] mensagem malformada recebida, conexao encerrada (" + std::string(e.what()) + ")");
     }
     ::close(conn);
 }

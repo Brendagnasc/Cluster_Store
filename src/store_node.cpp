@@ -11,49 +11,73 @@
 #include <map>
 #include <thread>
 #include <atomic>
+#include <stdexcept>
 
 struct Item {
     std::string valor = "0";
     long versao = 0;
+    std::string ultimo_reqid;   // ultima requisicao de escrita aplicada (dedup de retentativas)
 };
 
 static int MEU_ID = -1;
 static std::string TAG;
 
-static std::mutex g_mtx;
 static std::map<std::string, Item> g_dados;        // copia de todos os recursos
 static std::map<std::string, int>  g_primario;     // item -> id do Store primario
+static std::mutex g_item_mtx[NUM_ITENS];           // uma trava por item: serializa migracao de
+                                                    // primaria e escrita para o mesmo recurso
 
 static std::string item_nome(int i) { return "R" + std::to_string(i); }
 
-// Propagacao W4/W5 + teste de consistencia (executa apos responder ao Sync,
-// caracterizando o protocolo nao bloqueador do Protocolo 2).
+// Todos os itens sao pre-cadastrados em main() antes de qualquer thread iniciar,
+// entao g_dados/g_primario nunca sofrem insercao/remocao concorrente; .at() garante
+// isso estaticamente (nunca insere) e valida o indice usado para travar por item.
+static int item_idx(const std::string& item) {
+    if (item.size() < 2 || item[0] != 'R')
+        throw std::invalid_argument("item invalido: " + item);
+    int idx = std::stoi(item.substr(1));
+    if (idx < 0 || idx >= NUM_ITENS)
+        throw std::out_of_range("item fora do intervalo: " + item);
+    return idx;
+}
+
+// Propagacao W4/W5 (em paralelo, um Store por thread) + teste de consistencia.
+// Executa apos responder ao Sync, caracterizando o protocolo nao bloqueador do
+// Protocolo 2. Chamada com a trava do item ja adquirida pelo chamador.
 static void propagar_e_verificar(const std::string& item, const std::string& valor,
-                                 long versao) {
+                                 long versao, const std::string& reqid) {
     std::vector<int> saudaveis;
+    std::mutex mtx_saudaveis;
+    std::vector<std::thread> threads;
     for (int i = 0; i < NUM_STORE; i++) {
         if (i == MEU_ID) continue;
-        std::string req = "UPDATE|" + item + "|" + valor + "|" + std::to_string(versao)
-                          + "|" + std::to_string(MEU_ID);
-        std::string resp;
-        logmsg(TAG, "W4: dizendo ao backup Store " + std::to_string(i)
-                    + " para atualizar " + item + " (v" + std::to_string(versao) + ")");
-        if (rpc(store_host(i), store_port(i), req, resp) && split(resp)[0] == "ACK_UPDATE") {
-            logmsg(TAG, "W5: Store " + std::to_string(i)
-                        + " reconheceu a atualizacao de " + item);
-            saudaveis.push_back(i);
-        } else {
-            logmsg(TAG, "[FALHA DETECTADA] Store " + std::to_string(i)
-                        + " sem resposta ao W4 (queda ou omissao). Seguindo com as replicas saudaveis.");
-        }
+        threads.emplace_back([&, i]() {
+            std::string req = "UPDATE|" + item + "|" + valor + "|" + std::to_string(versao)
+                              + "|" + std::to_string(MEU_ID) + "|" + reqid;
+            std::string resp;
+            logmsg(TAG, "W4: dizendo ao backup Store " + std::to_string(i)
+                        + " para atualizar " + item + " (v" + std::to_string(versao) + ")");
+            bool ok = rpc(store_host(i), store_port(i), req, resp);
+            auto p = ok ? split(resp) : std::vector<std::string>{};
+            if (ok && !p.empty() && p[0] == "ACK_UPDATE") {
+                logmsg(TAG, "W5: Store " + std::to_string(i)
+                            + " reconheceu a atualizacao de " + item);
+                std::lock_guard<std::mutex> lk(mtx_saudaveis);
+                saudaveis.push_back(i);
+            } else {
+                logmsg(TAG, "[FALHA DETECTADA] Store " + std::to_string(i)
+                            + " sem resposta ao W4 (queda ou omissao). Seguindo com as replicas saudaveis.");
+            }
+        });
     }
+    for (auto& t : threads) t.join();
 
     // Teste de consistencia entre as replicas saudaveis
     bool ok = true;
     for (int i : saudaveis) {
         std::string resp;
         if (!rpc(store_host(i), store_port(i), "READ|" + item, resp)) { ok = false; continue; }
-        auto p = split(resp); // VALUE|item|valor|versao
+        auto p = split(resp); // VALUE|item|valor|versao|primario
         if (p.size() < 4 || p[2] != valor || std::stol(p[3]) != versao) ok = false;
     }
     if (ok)
@@ -63,37 +87,57 @@ static void propagar_e_verificar(const std::string& item, const std::string& val
         logmsg(TAG, "[CONSISTENCIA] DIVERGENCIA detectada em " + item + "!");
 }
 
-// Garante que este Store e o primario do item. Se nao for, executa o W2:
-// move a copia primaria do antigo primario para ca e avisa os demais.
+// Garante que este Store e o primario do item, executando o W2 se preciso: pede a
+// copia primaria ao dono anterior conhecido localmente. Se esse dono ja tiver
+// repassado a primaria para outro Store nesse meio-tempo (corrida entre duas
+// migracoes concorrentes para o mesmo item), ele responde REDIRECT e este Store
+// segue o ponteiro ate achar o dono atual ou esgotar as tentativas. Chamada com a
+// trava do item ja adquirida pelo chamador (serializa migracoes concorrentes deste
+// Store para o mesmo item).
 static void assumir_primaria(const std::string& item) {
-    int antigo;
-    {
-        std::lock_guard<std::mutex> lk(g_mtx);
-        antigo = g_primario[item];
-        if (antigo == MEU_ID) return;
-    }
-    logmsg(TAG, "W2: movendo item " + item + " do primario antigo (Store "
-                + std::to_string(antigo) + ") para o novo primario (Store "
-                + std::to_string(MEU_ID) + ")");
-    std::string resp;
-    if (rpc(store_host(antigo), store_port(antigo),
-            "TRANSFER|" + item + "|" + std::to_string(MEU_ID), resp)) {
-        auto p = split(resp); // ITEM|item|valor|versao
-        if (p.size() >= 4) {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            g_dados[item] = { p[2], std::stol(p[3]) };
+    int antigo = g_primario.at(item);
+    if (antigo == MEU_ID) return;
+
+    bool obteve = false;
+    std::string valor_recebido;
+    long versao_recebida = 0;
+    std::string reqid_recebido;
+    for (int hop = 0; hop < NUM_STORE && antigo != MEU_ID; hop++) {
+        logmsg(TAG, "W2: pedindo ao Store " + std::to_string(antigo)
+                    + " a copia primaria de " + item);
+        std::string resp;
+        if (!rpc(store_host(antigo), store_port(antigo),
+                 "TRANSFER|" + item + "|" + std::to_string(MEU_ID), resp)) {
+            logmsg(TAG, "[FALHA DETECTADA] Store " + std::to_string(antigo)
+                        + " sem resposta ao W2. Assumindo a primaria com a copia local.");
+            break;
         }
-    } else {
-        logmsg(TAG, "[FALHA DETECTADA] Primario antigo Store " + std::to_string(antigo)
-                    + " sem resposta. Assumindo a primaria com a copia local.");
+        auto p = split(resp);
+        if (!p.empty() && p[0] == "ITEM" && p.size() >= 5) {
+            valor_recebido = p[2];
+            versao_recebida = std::stol(p[3]);
+            reqid_recebido = p[4];
+            obteve = true;
+            break;
+        } else if (!p.empty() && p[0] == "REDIRECT" && p.size() >= 2) {
+            int indicado = std::stoi(p[1]);
+            logmsg(TAG, "Store " + std::to_string(antigo) + " ja repassou a primaria de "
+                        + item + "; seguindo para o Store " + std::to_string(indicado));
+            antigo = indicado;
+        } else {
+            break;
+        }
     }
-    {
-        std::lock_guard<std::mutex> lk(g_mtx);
-        g_primario[item] = MEU_ID;
+    if (obteve) {
+        Item& it = g_dados.at(item);
+        it.valor = valor_recebido;
+        it.versao = versao_recebida;
+        it.ultimo_reqid = reqid_recebido;
     }
+    g_primario.at(item) = MEU_ID;
     // Avisa os demais Stores sobre o novo primario (best effort)
     for (int i = 0; i < NUM_STORE; i++) {
-        if (i == MEU_ID || i == antigo) continue;
+        if (i == MEU_ID) continue;
         std::string r;
         rpc(store_host(i), store_port(i), "NEWPRIM|" + item + "|" + std::to_string(MEU_ID), r, 500);
     }
@@ -102,79 +146,140 @@ static void assumir_primaria(const std::string& item) {
 static void atender(int conn) {
     std::string linha;
     if (!recv_line(conn, linha)) { ::close(conn); return; }
-    auto p = split(linha);
-    const std::string& cmd = p[0];
+    try {
+        auto p = split(linha);
+        if (p.empty()) { ::close(conn); return; }
+        const std::string& cmd = p[0];
 
-    if (cmd == "PING") {
-        send_line(conn, "PONG");
+        if (cmd == "PING") {
+            send_line(conn, "PONG");
 
-    } else if (cmd == "WRITE" && p.size() >= 5) {
-        // WRITE|item|valor|reqid|sync_id  (encaminhado pelo Cluster Sync)
-        const std::string item = p[1], valor = p[2], reqid = p[3], sync = p[4];
-        assumir_primaria(item);
-        long versao;
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            Item& it = g_dados[item];
-            it.valor  = valor;
-            it.versao += 1;
-            versao = it.versao;
+        } else if (cmd == "WRITE" && p.size() >= 5) {
+            // WRITE|item|valor|reqid|sync_id  (encaminhado pelo Cluster Sync)
+            const std::string item = p[1], valor = p[2], reqid = p[3], sync = p[4];
+            std::lock_guard<std::mutex> critica(g_item_mtx[item_idx(item)]);
+            assumir_primaria(item);
+            Item& it = g_dados.at(item);
+            bool duplicada = !reqid.empty() && it.ultimo_reqid == reqid;
+            if (!duplicada) {
+                it.valor = valor;
+                it.versao += 1;
+                it.ultimo_reqid = reqid;
+            }
+            long versao = it.versao;
+            if (duplicada)
+                logmsg(TAG, "Requisicao " + reqid + " ja aplicada (retentativa apos falha do Sync"
+                            " ou do cliente); reconhecendo " + item + " sem reescrever (v"
+                            + std::to_string(versao) + ")");
+            else
+                logmsg(TAG, "Escrita aplicada localmente como primario: " + item + " = "
+                            + valor + " (v" + std::to_string(versao) + ", req " + reqid
+                            + ", via Sync " + sync + ")");
+            // Protocolo nao bloqueador: reconhece antes de propagar aos backups
+            send_line(conn, "ACK_WRITE|" + item + "|" + std::to_string(versao));
+            if (!duplicada) propagar_e_verificar(item, valor, versao, reqid);
+
+        } else if (cmd == "TRANSFER" && p.size() >= 3) {
+            // TRANSFER|item|novo_primario
+            const std::string item = p[1];
+            int novo = std::stoi(p[2]);
+            std::lock_guard<std::mutex> critica(g_item_mtx[item_idx(item)]);
+            if (g_primario.at(item) != MEU_ID) {
+                // Ja repassei a primaria deste item para outro Store (corrida com
+                // outra migracao concorrente): informo quem e o dono atual para o
+                // requisitante seguir o ponteiro em vez de receber uma copia velha.
+                send_line(conn, "REDIRECT|" + std::to_string(g_primario.at(item)));
+            } else {
+                Item copia = g_dados.at(item);
+                g_primario.at(item) = novo;
+                logmsg(TAG, "W2: entregando a copia primaria de " + item + " ao Store "
+                            + std::to_string(novo) + " (v" + std::to_string(copia.versao) + ")");
+                send_line(conn, "ITEM|" + item + "|" + copia.valor + "|"
+                                + std::to_string(copia.versao) + "|" + copia.ultimo_reqid);
+            }
+
+        } else if (cmd == "NEWPRIM" && p.size() >= 3) {
+            const std::string item = p[1];
+            std::lock_guard<std::mutex> critica(g_item_mtx[item_idx(item)]);
+            g_primario.at(item) = std::stoi(p[2]);
+            send_line(conn, "OK");
+
+        } else if (cmd == "UPDATE" && p.size() >= 6) {
+            // UPDATE|item|valor|versao|primario|reqid  (W4 vindo do primario)
+            const std::string item = p[1], valor = p[2];
+            long versao = std::stol(p[3]);
+            int primario_id = std::stoi(p[4]);
+            const std::string reqid = p[5];
+            logmsg(TAG, "W4 recebido do primario Store " + p[4] + ": atualizando backup "
+                        + item + " para v" + std::to_string(versao));
+            {
+                std::lock_guard<std::mutex> critica(g_item_mtx[item_idx(item)]);
+                Item& it = g_dados.at(item);
+                if (versao >= it.versao) {
+                    it.valor = valor;
+                    it.versao = versao;
+                    it.ultimo_reqid = reqid;
+                }
+                g_primario.at(item) = primario_id;
+            }
+            send_line(conn, "ACK_UPDATE|" + item + "|" + std::to_string(versao));
+            logmsg(TAG, "W5: reconhecimento de atualizacao enviado ao primario (item "
+                        + item + ")");
+
+        } else if (cmd == "READ" && p.size() >= 2) {
+            const std::string item = p[1];
+            Item copia;
+            int primario;
+            {
+                std::lock_guard<std::mutex> critica(g_item_mtx[item_idx(item)]);
+                copia = g_dados.at(item);
+                primario = g_primario.at(item);
+            }
+            send_line(conn, "VALUE|" + item + "|" + copia.valor + "|"
+                            + std::to_string(copia.versao) + "|" + std::to_string(primario));
+
+        } else {
+            send_line(conn, "ERRO|comando_invalido");
         }
-        logmsg(TAG, "Escrita aplicada localmente como primario: " + item + " = "
-                    + valor + " (v" + std::to_string(versao) + ", req " + reqid
-                    + ", via Sync " + sync + ")");
-        // Protocolo nao bloqueador: reconhece antes de propagar aos backups
-        send_line(conn, "ACK_WRITE|" + item + "|" + std::to_string(versao));
-        propagar_e_verificar(item, valor, versao);
-
-    } else if (cmd == "TRANSFER" && p.size() >= 3) {
-        // TRANSFER|item|novo_primario
-        const std::string item = p[1];
-        int novo = std::stoi(p[2]);
-        Item copia;
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            copia = g_dados[item];
-            g_primario[item] = novo;
-        }
-        logmsg(TAG, "W2: entregando a copia primaria de " + item + " ao Store "
-                    + std::to_string(novo) + " (v" + std::to_string(copia.versao) + ")");
-        send_line(conn, "ITEM|" + item + "|" + copia.valor + "|"
-                        + std::to_string(copia.versao));
-
-    } else if (cmd == "NEWPRIM" && p.size() >= 3) {
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            g_primario[p[1]] = std::stoi(p[2]);
-        }
-        send_line(conn, "OK");
-
-    } else if (cmd == "UPDATE" && p.size() >= 5) {
-        // UPDATE|item|valor|versao|primario  (W4 vindo do primario)
-        const std::string item = p[1], valor = p[2];
-        long versao = std::stol(p[3]);
-        logmsg(TAG, "W4 recebido do primario Store " + p[4] + ": atualizando backup "
-                    + item + " para v" + std::to_string(versao));
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            Item& it = g_dados[item];
-            if (versao >= it.versao) { it.valor = valor; it.versao = versao; }
-            g_primario[item] = std::stoi(p[4]);
-        }
-        send_line(conn, "ACK_UPDATE|" + item + "|" + std::to_string(versao));
-        logmsg(TAG, "W5: reconhecimento de atualizacao enviado ao primario (item "
-                    + item + ")");
-
-    } else if (cmd == "READ" && p.size() >= 2) {
-        Item copia;
-        {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            copia = g_dados[p[1]];
-        }
-        send_line(conn, "VALUE|" + p[1] + "|" + copia.valor + "|"
-                        + std::to_string(copia.versao));
+    } catch (const std::exception& e) {
+        logmsg(TAG, "[ERRO] mensagem malformada recebida, conexao encerrada (" + std::string(e.what()) + ")");
     }
     ::close(conn);
+}
+
+// Ao entrar (ou reentrar apos uma queda), busca nas outras replicas o estado mais
+// recente de cada item em vez de assumir os valores padrao: evita que um Store
+// reiniciado acredite ser o primario de um item cuja primaria ja migrou enquanto
+// ele estava fora, o que faria com que ele aplicasse escritas sobre dados obsoletos.
+static void sincronizar_com_cluster() {
+    for (int i = 0; i < NUM_ITENS; i++) {
+        std::string item = item_nome(i);
+        bool achou = false;
+        long melhor_versao = -1;
+        std::string melhor_valor = "0";
+        int melhor_primario = 0;
+        for (int s = 0; s < NUM_STORE; s++) {
+            if (s == MEU_ID) continue;
+            std::string resp;
+            if (!rpc(store_host(s), store_port(s), "READ|" + item, resp, 800)) continue;
+            auto p = split(resp); // VALUE|item|valor|versao|primario
+            if (p.size() < 5) continue;
+            long v = std::stol(p[3]);
+            achou = true;
+            if (v > melhor_versao) {
+                melhor_versao = v;
+                melhor_valor = p[2];
+                melhor_primario = std::stoi(p[4]);
+            }
+        }
+        if (achou) {
+            g_dados[item] = { melhor_valor, melhor_versao, "" };
+            g_primario[item] = melhor_primario;
+            logmsg(TAG, "Estado recuperado de " + item + " junto ao cluster: valor="
+                        + melhor_valor + ", v" + std::to_string(melhor_versao)
+                        + ", primario atual = Store " + std::to_string(melhor_primario));
+        }
+    }
 }
 
 int main(int argc, char** argv) {
@@ -184,8 +289,9 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < NUM_ITENS; i++) {
         g_dados[item_nome(i)] = Item{};
-        g_primario[item_nome(i)] = 0; // primario inicial de todos os itens: Store 0
+        g_primario[item_nome(i)] = 0; // primario inicial (primeira subida do cluster): Store 0
     }
+    sincronizar_com_cluster();
 
     int srv = tcp_listen(store_port(MEU_ID));
     if (srv < 0) { logmsg(TAG, "Erro ao abrir porta"); return 1; }

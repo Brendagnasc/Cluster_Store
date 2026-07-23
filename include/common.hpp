@@ -63,7 +63,9 @@ inline void monitor_send(const std::string& linha) {
     static sockaddr_in addr{};
     static bool resolvido = false;
     if (!resolvido) {
-        resolvido = true;
+        // So marca como resolvido em caso de sucesso: se o monitor ainda nao
+        // estiver de pe (corrida de inicializacao), tenta de novo na proxima
+        // chamada em vez de desistir de enviar eventos pelo resto da execucao.
         addrinfo hints{}, *res = nullptr;
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_DGRAM;
@@ -72,6 +74,7 @@ inline void monitor_send(const std::string& linha) {
             addr = *(sockaddr_in*)res->ai_addr;
             freeaddrinfo(res);
             fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+            resolvido = true;
         }
     }
     if (fd >= 0)
