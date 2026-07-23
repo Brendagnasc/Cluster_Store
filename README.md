@@ -1,5 +1,7 @@
 # TP3 (BCC362, Sistemas Distribuídos): Replicação com Primário Móvel e Tolerância a Falhas
 
+Aluna: Brenda (Matrícula 24.1.4011)
+
 Implementação completa do TP3 com o **Protocolo 2 (cópia primária móvel)**, a **exclusão mútua distribuída do TP2 (Ricart-Agrawala)** entre os elementos do Cluster Sync, e tolerância a **falhas por queda e omissão**, em C++17 com sockets POSIX e threads. Sem middleware; todos os nós são processos independentes que se comunicam exclusivamente por sockets TCP (e UDP apenas para o espelhamento de logs ao monitor, que é observacional e não participa do protocolo). A solução não é apenas multicore: os processos podem rodar em máquinas ou containers distintos (modo Docker Compose incluso).
 
 ## Arquitetura
@@ -22,7 +24,7 @@ Um Sync **somente acessa o Cluster Store dentro da seção crítica**. Para entr
 Recuperação da SC quando um Sync falha:
 
 * **Par morto (queda)**: a conexão TCP falha na hora; a autorização é presumida e registrada no log ("autorizacao presumida para evitar deadlock"). O morto não disputa a SC, então a presunção é segura.
-* **Par congelado (omissão)**: o pedido expira por timeout (RA_TIMEOUT). O par entra numa lista de suspeitos com espera reduzida nas próximas entradas, até voltar a responder.
+* **Par congelado (omissão)**: o pedido expira por timeout (RA_TIMEOUT) e o heartbeat o marca como fora; as próximas entradas na SC o pulam sem custo, até ele voltar a responder.
 * **Autorização antiga**: a permissão de SC tem validade (lease de 10 s). Um Sync retomado após uma pausa longa (unpause/SIGCONT) detecta que sua autorização expirou, descarta-a e **reentra na SC** em vez de usar a permissão velha.
 
 ## Protocolo 2 (cópia primária móvel): fluxo completo de uma escrita
@@ -53,7 +55,8 @@ Recuperação da SC quando um Sync falha:
 ## Detecção e tolerância a falhas (queda e omissão)
 
 * **Timeouts** em todas as comunicações (1,5 s padrão; valores maiores onde a operação legitimamente demora).
-* **PING periódico** do cliente ao seu Sync antes de cada operação, e verificador de saúde do monitor (PING a todos os nós a cada 2 s).
+* **PING periódico** em três camadas: do cliente ao seu Sync antes de cada operação; **heartbeat contínuo entre os Syncs** (PING a cada 1 s; dois PINGs perdidos marcam o par como fora, um respondido o devolve), consultado pela entrada na SC para pular mortos sem pagar timeout; e verificador de saúde do monitor (PING a todos os nós a cada 2 s).
+* **Resolução de nomes com cache e aquecimento**: `getaddrinfo` não tem timeout e o DNS do Docker pode travar com containers mortos; cada nó resolve todos os hosts na partida e reutiliza os endereços. O compose ainda fixa IPs estáticos por serviço, eliminando o problema na raiz.
 * **Opção 1 do enunciado (falha de elemento do Cluster Sync), nos três estados**: o cliente não percebe a falha; ele detecta o silêncio (PING ou timeout do W1), redireciona-se sozinho a outro Sync e **reenvia o mesmo reqid**, que o Store deduplica.
   * 1.1 Sync ocioso: os demais presumem a autorização de SC do morto; nada trava.
   * 1.2 Sync com pedido do cliente: cliente mascara e reenvia.
