@@ -18,6 +18,7 @@
 #include <vector>
 #include <sstream>
 #include <mutex>
+#include <map>
 #include <chrono>
 
 // ---------------- Configuracao global ----------------
@@ -107,18 +108,49 @@ inline std::vector<std::string> split(const std::string& s, char sep = '|') {
 }
 
 // ---------------- Sockets ----------------
-// Conecta em host:port com timeout (resolve o hostname e usa connect nao
-// bloqueante + select para detectar no fora do ar).
-inline int tcp_connect(const std::string& host, int port, int timeout_ms = TIMEOUT_MS) {
+// Cache de resolucao de nomes. getaddrinfo NAO tem timeout: com um container
+// morto, o DNS do Docker pode demorar segundos, travando quem tenta falar com
+// ele. Resolvemos cada host uma unica vez (idealmente no aquecimento, com todos
+// vivos) e reutilizamos o endereco em todas as conexoes seguintes.
+inline bool resolver_host(const std::string& host, sockaddr_in& saida) {
+    static std::mutex mtx;
+    static std::map<std::string, in_addr> cache;
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        auto it = cache.find(host);
+        if (it != cache.end()) { saida.sin_addr = it->second; return true; }
+    }
     addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res)
-        return -1;
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
-    sockaddr_in addr = *(sockaddr_in*)res->ai_addr;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) return false;
+    in_addr ip = ((sockaddr_in*)res->ai_addr)->sin_addr;
     freeaddrinfo(res);
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        cache[host] = ip;
+    }
+    saida.sin_addr = ip;
+    return true;
+}
+
+// Resolve antecipadamente todos os hosts do sistema (best effort), enquanto
+// todos tendem a estar vivos, para que falhas futuras nao custem DNS lento.
+inline void aquecer_dns() {
+    sockaddr_in tmp{};
+    for (int i = 0; i < NUM_SYNC; i++)  resolver_host(sync_host(i), tmp);
+    for (int i = 0; i < NUM_STORE; i++) resolver_host(store_host(i), tmp);
+    resolver_host(monitor_host(), tmp);
+}
+
+// Conecta em host:port com timeout (connect nao bloqueante + select).
+inline int tcp_connect(const std::string& host, int port, int timeout_ms = TIMEOUT_MS) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    if (!resolver_host(host, addr)) return -1;
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
 
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
