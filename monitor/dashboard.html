@@ -156,6 +156,10 @@ function no(tipo, i) {
     const c = el('text', { y: -r - 8, 'text-anchor': 'middle', fill: CORES.ok, 'font-size': 10, class: 'prims' }, g);
     c.textContent = '';
   }
+  if (tipo === 'sync') {
+    const b = el('text', { y: -r - 8, 'text-anchor': 'middle', fill: '#f5b942', 'font-size': 10, 'font-weight': 700, class: 'badge-sc' }, g);
+    b.textContent = '';
+  }
   if (tipo !== 'cli') {
     g.style.cursor = 'pointer';
     g.addEventListener('click', ev => { ev.stopPropagation(); abrirMenu(tipo, i, ev); });
@@ -193,6 +197,7 @@ function marcarEstado(tipo, i, estado) {
   // deteccao generica nos logs nao sobrescreve queda/omissao ja conhecidas
   if (estado === 'falha' && (arr[i] === 'queda' || arr[i] === 'omissao')) return;
   arr[i] = estado;
+  if (tipo === 'sync' && estado !== 'ativo') marcarSC(i, false);
   pintarNo(tipo, i);
   pintarTabela();
 }
@@ -232,6 +237,10 @@ async function injetar(tipo, i, modo) {
   }
 }
 window.injetar = injetar;
+function marcarSC(i, dentro) {
+  const b = gruposNo.sync[i] && gruposNo.sync[i].querySelector('.badge-sc');
+  if (b) b.textContent = dentro ? '\u25CF SC' : '';
+}
 function pintarPrimarios() {
   for (let s = 0; s < N_STORE; s++) {
     const meus = ITENS.filter(it => primario[it] === s);
@@ -325,6 +334,8 @@ function processar(linha) {
     }
 
   } else if (tipo === 'Sync') {
+    if (msg.includes('ENTROU na secao critica')) marcarSC(id, true);
+    else if (msg.includes('SAIU da secao critica')) marcarSC(id, false);
     if ((m = msg.match(/Encaminhando escrita de (R\d) ao Store (\d+)/)))
       pacote(pos.sync[id], pos.store[+m[2]], 'W', CORES.sync);
     else if ((m = msg.match(/\[FALHA DETECTADA\] Store (\d+)/)))
