@@ -14,6 +14,13 @@ x-node: &node
   environment:
     - DOCKER_MODE=1
 
+networks:
+  tp3net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
 services:
   monitor:
     build:
@@ -24,71 +31,113 @@ services:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # para o painel injetar falhas
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.2
 
   store0:
     <<: *node
     container_name: tp3-store0
     command: ./bin/store_node 0
     depends_on: [monitor]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.10
   store1:
     <<: *node
     container_name: tp3-store1
     command: ./bin/store_node 1
     depends_on: [monitor]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.11
   store2:
     <<: *node
     container_name: tp3-store2
     command: ./bin/store_node 2
     depends_on: [monitor]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.12
 
   sync0:
     <<: *node
     container_name: tp3-sync0
     command: ./bin/sync_node 0
     depends_on: [monitor, store0, store1, store2]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.20
   sync1:
     <<: *node
     container_name: tp3-sync1
     command: ./bin/sync_node 1
     depends_on: [monitor, store0, store1, store2]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.21
   sync2:
     <<: *node
     container_name: tp3-sync2
     command: ./bin/sync_node 2
     depends_on: [monitor, store0, store1, store2]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.22
   sync3:
     <<: *node
     container_name: tp3-sync3
     command: ./bin/sync_node 3
     depends_on: [monitor, store0, store1, store2]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.23
   sync4:
     <<: *node
     container_name: tp3-sync4
     command: ./bin/sync_node 4
     depends_on: [monitor, store0, store1, store2]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.24
 
   client0:
     <<: *node
     container_name: tp3-client0
     command: ./bin/client 0
     depends_on: [sync0, sync1, sync2, sync3, sync4]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.30
   client1:
     <<: *node
     container_name: tp3-client1
     command: ./bin/client 1
     depends_on: [sync0, sync1, sync2, sync3, sync4]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.31
   client2:
     <<: *node
     container_name: tp3-client2
     command: ./bin/client 2
     depends_on: [sync0, sync1, sync2, sync3, sync4]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.32
   client3:
     <<: *node
     container_name: tp3-client3
     command: ./bin/client 3
     depends_on: [sync0, sync1, sync2, sync3, sync4]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.33
   client4:
     <<: *node
     container_name: tp3-client4
     command: ./bin/client 4
     depends_on: [sync0, sync1, sync2, sync3, sync4]
+    networks:
+      tp3net:
+        ipv4_address: 172.28.0.34
